@@ -27,10 +27,10 @@ class Null_Model(torch.nn.Module):
         pass
 
 
-def load_cascadeultra(stage_c_path, stage_up_path):
+def load_UltraCascade(stage_c_path, stage_up_path):
 
     sd = comfy.utils.load_torch_file(stage_c_path)
-    model = load_unet_state_dict_cascadeultra(sd)
+    model = load_unet_state_dict_ultracascade(sd)
     if model is None:
         print("ERROR UNSUPPORTED UNET {}".format(stage_c_path))
         raise RuntimeError("ERROR: Could not detect model type of: {}".format(stage_c_path))
@@ -57,7 +57,7 @@ def load_cascadeultra(stage_c_path, stage_up_path):
     return model
 
 
-def load_unet_state_dict_cascadeultra(sd): #load unet in diffusers or regular format
+def load_unet_state_dict_ultracascade(sd): #load unet in diffusers or regular format
     #Allow loading unets from checkpoint files
     diffusion_model_prefix = comfy.model_detection.unet_prefix_from_state_dict(sd)
     temp_sd = comfy.utils.state_dict_prefix_replace(sd, {diffusion_model_prefix: ""}, filter_keys=True)
@@ -67,14 +67,14 @@ def load_unet_state_dict_cascadeultra(sd): #load unet in diffusers or regular fo
     parameters = comfy.utils.calculate_parameters(sd)
     unet_dtype = comfy.model_management.unet_dtype(model_params=parameters)
     load_device = comfy.model_management.get_torch_device()
-    model_config = model_config_from_unet_cascadeultra(sd, "")
+    model_config = model_config_from_unet_ultracascade(sd, "")
 
     if model_config is not None:
         new_sd = sd
     else:
         new_sd = comfy.model_detection.convert_diffusers_mmdit(sd, "")
         if new_sd is not None: #diffusers mmdit
-            model_config = model_config_from_unet_cascadeultra(new_sd, "")
+            model_config = model_config_from_unet_ultracascade(new_sd, "")
             if model_config is None:
                 return None
         else: #diffusers unet
@@ -104,18 +104,18 @@ def load_unet_state_dict_cascadeultra(sd): #load unet in diffusers or regular fo
     return comfy.model_patcher.ModelPatcher(model, load_device=load_device, offload_device=offload_device)
 
 
-def model_config_from_unet_cascadeultra(state_dict, unet_key_prefix, use_base_if_no_match=False):
-    unet_config = detect_unet_config_cascadeultra(state_dict, unet_key_prefix)
+def model_config_from_unet_ultracascade(state_dict, unet_key_prefix, use_base_if_no_match=False):
+    unet_config = detect_unet_config_ultracascade(state_dict, unet_key_prefix)
     if unet_config is None:
         return None
-    model_config = model_config_from_unet_config_cascadeultra(unet_config, state_dict)
+    model_config = model_config_from_unet_config_ultracascade(unet_config, state_dict)
     if model_config is None and use_base_if_no_match:
         return comfy.supported_models_base.BASE(unet_config)
     else:
         return model_config
 
 
-def detect_unet_config_cascadeultra(state_dict, key_prefix):
+def detect_unet_config_ultracascade(state_dict, key_prefix):
     state_dict_keys = list(state_dict.keys())
     if '{}clf.1.weight'.format(key_prefix) in state_dict_keys: #stable cascade
         unet_config = {}
@@ -133,7 +133,7 @@ def detect_unet_config_cascadeultra(state_dict, key_prefix):
     return unet_config
 
 
-def model_config_from_unet_config_cascadeultra(unet_config, state_dict=None):
+def model_config_from_unet_config_ultracascade(unet_config, state_dict=None):
     for model_config in models:
         if model_config.matches(unet_config, state_dict):
             return model_config(unet_config)

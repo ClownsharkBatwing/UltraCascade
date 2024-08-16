@@ -1,10 +1,139 @@
 import torch
 from torch import nn
 import torchvision
+import functools
 
+from comfy.samplers import CFGGuider
 from comfy.ldm.cascade.common import AttnBlock, ResBlock, TimestepBlock
 from ..modules.inr_fea_res_lite import TransInr, ScaleNormalize_res
 from comfy.ldm.cascade.stage_c import StageC
+
+def ultracascade_reset_hook(func):
+    @functools.wraps(func)
+    def wrapper(self, *args, **kwargs):
+        UltraCascadePatch.reset_sampling()
+        return func(self, *args, **kwargs)
+    return wrapper
+
+original_sample = CFGGuider.sample
+CFGGuider.sample = ultracascade_reset_hook(original_sample)
+
+class UltraCascadePatch:
+    current_step = 0
+    x_lr = None
+    guide_weights = None
+    guide_type = 'residual'
+
+    @classmethod
+    def reset_sampling(cls):
+        cls.current_step = 0
+    def __init__(self, x_lr, guide_weights, guide_type):
+        self.x_lr = x_lr
+        self.guide_weights = guide_weights
+        self.guide_type = guide_type
+        self.lr_guide = None
+
+    def __call__(self, x, r, clip_text, clip_text_pooled, clip_img, extra_options):
+        if self.x_lr is None:
+            return x
+        with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+            if self.lr_guide is None or self.__class__.current_step == 0:
+                self.lr_guide = None
+                self.__class__.current_step = 0
+                self.lr_guide = self.generate_lr_guide(x, r, clip_text, clip_text_pooled, clip_img, extra_options)
+
+            if self.guide_weights is not None:
+                guide_weight = self.guide_weights[self.__class__.current_step]
+            else:
+                guide_weight = r[0].item()
+
+        self.__class__.current_step += 1
+        
+        x = self.apply_guide(x, self.lr_guide, guide_weight, extra_options)
+
+        return x
+    
+    def update(self, x_lr, guide_weights, guide_type, reset=True):
+        if x_lr is not None:
+            self.x_lr = x_lr
+        if guide_weights is not None:
+            self.guide_weights = guide_weights
+        if guide_type is not None:
+            self.guide_type = guide_type
+        
+        if reset:
+            self.lr_guide = None
+            self.current_step = 0
+
+    def generate_lr_guide(self, x, r, clip_text, clip_text_pooled, clip_img, extra_options):
+        r_embed = extra_options['r_embed']
+        clip = extra_options['clip']
+        cnet = extra_options['cnet']
+
+        # generate lr_guide when x_lr is set but lr_guide is None
+        x_lr = self.x_lr.to(dtype=x.dtype, device=x.device)
+        x_lr = extra_options['model'].embedding(x_lr)
+        
+        r_embed = extra_options['model'].gen_r_embedding(r).to(dtype=x.dtype)
+        for c in extra_options['model'].t_conds:
+            t_cond = extra_options.get(c, torch.zeros_like(r))
+            r_embed = torch.cat([r_embed, extra_options['model'].gen_r_embedding(t_cond).to(dtype=x.dtype)], dim=1)
+        clip = extra_options['model'].gen_c_embeddings(clip_text, clip_text_pooled, clip_img)
+        
+        level_outputs, lr_enc = extra_options['model']._down_encode(
+            x_lr, r_embed, clip, cnet, require_q=True, lr_guide=None)
+        _, lr_dec = extra_options['model']._up_decode(
+            level_outputs, r_embed, clip, cnet, require_ff=True, agg_f=None)
+        
+        return ([f.chunk(2)[0].repeat(2, 1, 1, 1) for f in lr_enc], 
+                [f.chunk(2)[0].repeat(2, 1, 1, 1) for f in lr_dec])
+
+    def apply_guide(self, x, lr_guide, guide_weight, extra_options):
+        r_embed = extra_options['r_embed']
+        clip = extra_options['clip']
+        cnet = extra_options['cnet']
+        pag_patch_flag = extra_options['pag_patch_flag']
+        sag_func = extra_options['sag_func']
+        guide_mode_weighted = self.guide_type == "weighted"
+
+        r_embed = extra_options['model'].gen_r_embedding(extra_options['r']).to(dtype=x.dtype)
+        for c in extra_options['model'].t_conds:
+            t_cond = extra_options.get(c, torch.zeros_like(extra_options['r']))
+            r_embed = torch.cat([r_embed, extra_options['model'].gen_r_embedding(t_cond).to(dtype=x.dtype)], dim=1)        
+        clip = extra_options['model'].gen_c_embeddings(extra_options['clip_text'], extra_options['clip_text_pooled'], extra_options['clip_img'])
+        
+        level_outputs = extra_options['model']._down_encode(
+            x, r_embed, clip, cnet, 
+            require_q=False, 
+            r_emb_lite=extra_options['model'].gen_r_embedding(extra_options['r']),  
+            guide_weight=guide_weight,
+            guide_mode_weighted=guide_mode_weighted,
+            lr_guide=lr_guide[0] if lr_guide is not None else None,
+            pag_patch_flag=pag_patch_flag,
+        )
+
+        x = extra_options['model']._up_decode(
+            level_outputs, r_embed, clip, cnet, 
+            require_ff=False, 
+            r_emb_lite=extra_options['model'].gen_r_embedding(extra_options['r']), 
+            guide_weight=guide_weight,
+            guide_mode_weighted=guide_mode_weighted,
+            agg_f=lr_guide[1] if lr_guide is not None else None,
+            pag_patch_flag=pag_patch_flag,
+            sag_func=sag_func,
+        )
+
+        return x
+    
+    def to(self, device):
+        if self.x_lr is not None:
+            self.x_lr = self.x_lr.to(device)
+        if self.guide_weights is not None:
+            self.guide_weights = self.guide_weights.to(device)
+        if self.lr_guide is not None:
+            self.lr_guide = ([f.to(device) for f in self.lr_guide[0]], [f.to(device) for f in self.lr_guide[1]])
+        return self
+
 
 class StageUP(StageC):
     def __init__(self, c_in=16, c_out=16, c_r=64, patch_size=1, c_cond=2048, c_hidden=[2048, 2048], nhead=[32, 32],
@@ -12,14 +141,6 @@ class StageUP(StageC):
                  c_clip_text=1280, c_clip_text_pooled=1280, c_clip_img=768, c_clip_seq=4, kernel_size=3,
                  dropout=[0.0, 0.0], self_attn=True, t_conds=['sca', 'crp'], switch_level=[False], stable_cascade_stage=None,
                  dtype=None, device=None, operations=None):
-
-        self.x_lr=None
-        self.lr_guide=None 
-        self.require_f=False 
-        self.require_t=False 
-        self.guide_weight=0.5 
-        self.guide_weights=None
-        self.guide_weights_tmp=None
 
         self.c_hidden = c_hidden
         self.blocks = blocks
@@ -30,22 +151,13 @@ class StageUP(StageC):
                  dropout=dropout, self_attn=self_attn, t_conds=t_conds, switch_level=switch_level, stable_cascade_stage=stable_cascade_stage,
                  dtype=dtype, device=device, operations=operations)
         
-    def set_guide_type(self, guide_type=None):
-        self.guide_mode_weighted = True if guide_type == 'weighted' else False
-
-    def set_x_lr(self, x_lr=None):
-        self.x_lr = x_lr
-        self.lr_guide = None
-        
-    def set_guide_weights(self, guide_weights=None):
-        self.guide_weights = guide_weights
-        self.guide_weights_tmp = guide_weights
+        self._init_extra_parameter()
 
     def _init_extra_parameter(self):
         self.agg_net, self.agg_net_up, self.norm_down_blocks, self.norm_up_blocks = (nn.ModuleList() for _ in range(4))
 
         for _ in range(2):                 
-            self.agg_net.   append(TransInr(time_dim=self.c_r))    #ind=2048, ch=1024, n_head=32, n_groups=64, f_dim=1024... head_dim = 32 
+            self.agg_net.append(TransInr(time_dim=self.c_r))    #ind=2048, ch=1024, n_head=32, n_groups=64, f_dim=1024... head_dim = 32 
             self.agg_net_up.append(TransInr(time_dim=self.c_r)) 
 
         for i in range(len(self.c_hidden)):
@@ -64,7 +176,7 @@ class StageUP(StageC):
 
 
 
-    def _down_encode(self, x, r_embed, clip, cnet=None, require_q=False, lr_guide=None, r_emb_lite=None, guide_weight=1, pag_patch_flag=False):
+    def _down_encode(self, x, r_embed, clip, cnet=None, require_q=False, lr_guide=None, r_emb_lite=None, guide_weight=1, guide_mode_weighted=False, pag_patch_flag=False):
     
         if require_q:
             qs = []
@@ -112,8 +224,8 @@ class StageUP(StageC):
 
 
 
-    def _up_decode(self, level_outputs, r_embed, clip, cnet=None, require_ff=False, agg_f=None, r_emb_lite=None, guide_weight=1, pag_patch_flag=False, sag_func=None): 
-        
+    def _up_decode(self, level_outputs, r_embed, clip, cnet=None, require_ff=False, agg_f=None, r_emb_lite=None, guide_weight=1, guide_mode_weighted=False, pag_patch_flag=False, sag_func=None):
+
         if require_ff:
             agg_feas = []
             
@@ -179,7 +291,7 @@ class StageUP(StageC):
                                 guide_flat = guide_flat + guide[i2].unsqueeze(0)
                             guide_flat = guide_flat / len(guide)
 
-                            if self.guide_mode_weighted is True:
+                            if guide_mode_weighted is True:
                                 x = (1 - guide_weight) * x + guide_weight * guide_flat.to(dtype=x.dtype)
                             else:
                                 x = x + guide_weight * guide_flat.to(dtype=x.dtype)
@@ -201,14 +313,10 @@ class StageUP(StageC):
 
 
 
-    def forward(self, x, r, clip_text, clip_text_pooled, clip_img, control=None, lr_guide=None, require_f=False, require_t=False, guide_weight=1.0, **kwargs):
-        
-        cnet = control #transformer_patches_replace = transformer_options[k]
-        
-        lr_guide = self.lr_guide
-        require_f = self.require_f
-        require_t = self.require_t
-        
+    def forward(self, x, r, clip_text, clip_text_pooled, clip_img, control=None, **kwargs):
+        to = kwargs.get("transformer_options", {}).copy()
+        patch = to.get("patches_replace", {}).get("ultracascade", {}).get("main", None)
+
         r_embed = self.gen_r_embedding(r).to(dtype=x.dtype)
         for c in self.t_conds:
             t_cond = kwargs.get(c, torch.zeros_like(r))
@@ -221,44 +329,34 @@ class StageUP(StageC):
             cnet = control.get("input")
         else:
             cnet = None
+
+        pag_patch_flag = False
+        if "patches_replace" in to and "pag_patch" in to["patches_replace"]:
+            pag_patch_flag = True
+
+        sag_func = to.get('patches_replace', {}).get('attn1', {}).get(('middle', 0, 0), None)
         
         with torch.cuda.amp.autocast(dtype=torch.bfloat16):
-            if self.x_lr is not None and self.lr_guide is None: # x_lr is set, but lr_guide is missing: run one step to generate lr_guide
-                self.guide_weights_tmp = self.guide_weights
-                x_lr = self.x_lr.to(dtype=x.dtype, device=x.device)
-                x_lr = self.embedding(x_lr)
-                level_outputs, lr_enc = self._down_encode(x_lr, r_embed, clip, cnet, require_q=True,
-                                                        lr_guide=None) #lr_guide=lr_guide[0] if lr_guide is not None else None,
-                
-                x_out, lr_dec = self._up_decode(level_outputs, r_embed, clip, cnet, require_ff=True, 
-                                                agg_f=None) #agg_f=lr_guide[1] if lr_guide is not None else None,
-                
-                lr_guide = ([f.chunk(2)[0].repeat(2, 1, 1, 1) for f in lr_enc], 
-                            [f.chunk(2)[0].repeat(2, 1, 1, 1) for f in lr_dec])
-                self.lr_guide = lr_guide
-                
-            if self.guide_weights is not None:
-                guide_weight = self.guide_weights_tmp[0].item() 
-                self.guide_weights_tmp = self.guide_weights_tmp[1:]
-            else: 
-                guide_weight = r[0].item()
+            if patch and patch.x_lr is not None:
+                extra_options = {
+                    'model': self,
+                    'r': r,
+                    'r_embed': r_embed,
+                    'clip': clip,
+                    'clip_text': clip_text,
+                    'clip_text_pooled': clip_text_pooled,
+                    'clip_img': clip_img,
+                    'cnet': cnet,
+                    'sigmas': to.get('sigmas', torch.tensor([999999999.9])),
+                    'pag_patch_flag': pag_patch_flag,
+                    'sag_func': sag_func,
+                }
+                x = patch(x, r, clip_text, clip_text_pooled, clip_img, extra_options)
+            else:
+                level_outputs = self._down_encode(x, r_embed, clip, cnet)
+                x = self._up_decode(level_outputs, r_embed, clip, cnet)
+
+            if x.dtype == torch.float32:
+                x = x.to(torch.bfloat16)
         
-            pag_patch_flag = True if 'patches_replace' in kwargs['transformer_options'] else False
-            #sag_func = kwargs['transformer_options']['patches_replace']['attn1'][('middle',0,0)] if 'patches_replace' in kwargs['transformer_options'] else None
-            sag_func = (kwargs.get('transformer_options', {})
-                              .get('patches_replace', {})
-                              .get('attn1', {})
-                              .get(('middle', 0, 0), None))
-            
-            level_outputs = self._down_encode(x, r_embed, clip, cnet, require_q=require_f, r_emb_lite=self.gen_r_embedding(r),  guide_weight=guide_weight,
-                                            lr_guide=lr_guide[0] if lr_guide is not None else None,
-                                            pag_patch_flag=pag_patch_flag)
-
-            x = self._up_decode(level_outputs, r_embed, clip, cnet, require_ff=require_f, r_emb_lite=self.gen_r_embedding(r), guide_weight=guide_weight,
-                                agg_f=lr_guide[1] if lr_guide is not None else None,
-                                pag_patch_flag=pag_patch_flag, sag_func=sag_func)
-
-            return self.clf(x)
-
-
-
+        return self.clf(x)

@@ -5,6 +5,7 @@ from nodes import common_ksampler
 import torch
 import comfy.clip_vision
 import comfy.model_management
+from .modules.stage_up import UltraCascadePatch
 
 MAX_RESOLUTION=8192
 
@@ -14,45 +15,40 @@ def initialize_or_scale(tensor, value, steps):
     else:
         return value * tensor
 
-class UltraCascadePatch:
-    def __init__(self, x_lr=None, guide_weights=None, guide_type='residual'):
-        self.x_lr = x_lr
-        self.guide_weights = guide_weights
-        self.guide_type = guide_type
-
-    def apply(self, model):
-        model.x_lr = self.x_lr
-        model.guide_weights = self.guide_weights
-        model.guide_mode_weighted = self.guide_type == "weighted"
-
 class UltraCascade_Set_LR_Guide:
     @classmethod
     def INPUT_TYPES(s):
-        return {
-            "required": {
-                "guide_type": (['residual', 'weighted'], ),
-                "model": ("MODEL",),
-                "x_lr": ("LATENT",),
-                "guide_weight": ("FLOAT", {"default": 0.0, "min": -100.0, "max": 100.0, "step":0.01, "round": 0.01}),
-                "noise_seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+        return {"required": {
+            "model": ("MODEL",),
+            "guide": ("LATENT",),
+            "guide_weight": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 5.0, "step": 0.01}),
+            "guide_type": (["residual", "weighted"],),
             },
             "optional": {
                 "guide_weights": ("SIGMAS",),
             }
         }
 
-    RETURN_TYPES = ("MODEL","INT",)
-    RETURN_NAMES = ("stage_up","seed",)
+    RETURN_TYPES = ("MODEL",)
+    RETURN_NAMES = ("stage_up",)
     FUNCTION = "main"
     CATEGORY = "UltraCascade"
 
-    def main(self, guide_type, model, x_lr, guide_weight, noise_seed, guide_weights=None):
-        guide_weights = initialize_or_scale(guide_weights, guide_weight, 10000)
-        model.model.diffusion_model.set_guide_type(guide_type=guide_type)
-        model.model.diffusion_model.set_x_lr(x_lr=x_lr['samples'])
-        model.model.diffusion_model.set_guide_weights(guide_weights)
-        
-        return (model,noise_seed)
+    def main(self, model, guide, guide_weight, guide_type, guide_weights=None):
+        work_model = model.clone()
+        num_steps = work_model.model.model_sampling.num_timesteps   # only used if guide_weights is not provided
+
+        # guide_weights initialization
+        if guide_weights is not None:
+            guide_weights = guide_weights * guide_weight
+        else:
+            guide_weights = torch.full((num_steps,), guide_weight, device=comfy.model_management.get_torch_device())
+            
+        to = work_model.model_options["transformer_options"]
+        patch = to["patches_replace"]["ultracascade"]["main"]
+        patch.update(guide['samples'], guide_weights, guide_type)
+
+        return (work_model,)
     
     
 class UltraCascade_Init:
@@ -71,9 +67,11 @@ class UltraCascade_Init:
     CATEGORY = "UltraCascade"
 
     def main(self, model, noise_seed):
-        model.model.diffusion_model.set_x_lr(x_lr=None)
-        model.model.diffusion_model.set_guide_weights(None)
-        return (model,noise_seed)
+        to = model.model_options["transformer_options"]
+        patch = to["patches_replace"]["ultracascade"]["main"]
+        patch.update(x_lr=None, guide_weights=None, guide_type=None, reset=True)
+
+        return (model)
    
    
 class UltraCascade_Clear_LR_Guide:
@@ -92,8 +90,9 @@ class UltraCascade_Clear_LR_Guide:
     CATEGORY = "UltraCascade"
 
     def main(self, stage_up, latent):
-        stage_up.model.diffusion_model.set_x_lr(x_lr=None)
-        stage_up.model.diffusion_model.set_guide_weights(None)
+        to = stage_up.model_options["transformer_options"]
+        patch = to["patches_replace"]["ultracascade"]["main"]
+        patch.update(x_lr=None, guide_weights=None, guide_type=None, reset=True)
         return (latent)
    
 
@@ -139,14 +138,21 @@ class UltraCascade_Loader:
     def main(self, stage_c_name, stage_up_name):
         stage_c_path = folder_paths.get_full_path("unet", stage_c_name)
         stage_up_path = folder_paths.get_full_path("unet", stage_up_name)
-        model_c = load_UltraCascade(stage_c_path, stage_up_path)
+        model = load_UltraCascade(stage_c_path, stage_up_path)
         
-        model_c.model_options['transformer_options']['guide_mode_weighted'] = None
-        model_c.model_options['transformer_options']['x_lr']                = None
-        model_c.model_options['transformer_options']['guide_weights']       = None
-        
-        return (model_c,)
-    
+        # set empty patch
+        patch = UltraCascadePatch(None, None, None)
+        if "transformer_options" not in model.model_options:
+            model.model_options["transformer_options"] = {}
+        to = model.model_options["transformer_options"].copy()
+        if "patches_replace" not in to:
+            to["patches_replace"] = {}
+        if "ultracascade" not in to["patches_replace"]:
+            to["patches_replace"]["ultracascade"] = {}
+        to["patches_replace"]["ultracascade"]["main"] = patch
+        model.model_options["transformer_options"] = to
+
+        return (model,)
     
 class UltraCascade_ClipVision:
     @classmethod
@@ -251,8 +257,11 @@ class UltraCascade_Stage_B:
     CATEGORY = "UltraCascade"
 
     def main(self, stage_up, latent, positive):
-        stage_up.model.diffusion_model.set_x_lr(x_lr=None)
-        stage_up.model.diffusion_model.set_guide_weights(None)
+        work_model = stage_up.clone()
+        if work_model.model.model_config.unet_config['stable_cascade_stage'] == 'up':
+            to = work_model.model_options["transformer_options"]
+            patch = to["patches_replace"]["ultracascade"]["main"]
+            patch.update(None, None, None)
         
         c_pos, c_neg = [], []
         for t in positive:
@@ -300,14 +309,14 @@ class UltraCascade_KSampler:
     CATEGORY = "sampling"
 
     def sample(self, model, seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, guide_type, guide_weight, guide=None, denoise=1.0):
-
-        if model.model.model_config.unet_config['stable_cascade_stage'] == 'up':
+        work_model = model.clone()
+        if work_model.model.model_config.unet_config['stable_cascade_stage'] == 'up':
             x_lr = guide['samples'] if guide is not None else None
             guide_weights = initialize_or_scale(None, guide_weight, 10000)
-            model.model.diffusion_model.set_guide_weights(guide_weights=guide_weights)
-            model.model.diffusion_model.set_guide_type(guide_type=guide_type)
-            model.model.diffusion_model.set_x_lr(x_lr=x_lr)
-        elif model.model.model_config.unet_config['stable_cascade_stage'] == 'b':
+            to = work_model.model_options["transformer_options"]
+            patch = to["patches_replace"]["ultracascade"]["main"]
+            patch.update(x_lr=x_lr, guide_weights=guide_weights, guide_type=guide_type)
+        elif work_model.model.model_config.unet_config['stable_cascade_stage'] == 'b':
             c_pos, c_neg = [], []
             for t in positive:
                 d_pos = t[1].copy()
@@ -324,7 +333,7 @@ class UltraCascade_KSampler:
             positive = c_pos
             negative = c_neg
                 
-        return common_ksampler(model, seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, denoise=denoise)
+        return common_ksampler(work_model, seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, denoise=denoise)
     
 
 class UltraCascade_KSamplerAdvanced:
@@ -360,11 +369,13 @@ class UltraCascade_KSamplerAdvanced:
     CATEGORY = "sampling"
 
     def sample(self, model, add_noise, noise_seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, start_at_step, end_at_step, return_with_leftover_noise, mode, guide_type, guide_weight, guide=None, guide_weights=None, denoise=1.0):
-
-        guide_weights = initialize_or_scale(guide_weights, guide_weight, 10000)
-        model.model.diffusion_model.set_guide_weights(guide_weights=guide_weights)
-        model.model.diffusion_model.set_guide_type(guide_type=guide_type)
-        model.model.diffusion_model.set_x_lr(x_lr=guide['samples'])
+        work_model = model.clone()
+        if mode == "Stage_UP" and work_model.model.model_config.unet_config['stable_cascade_stage'] == 'up':
+            x_lr = guide['samples'] if guide is not None else None
+            guide_weights = initialize_or_scale(guide_weights, guide_weight, 10000)
+            to = work_model.model_options["transformer_options"]
+            patch = to["patches_replace"]["ultracascade"]["main"]
+            patch.update(x_lr, guide_weights, guide_type)
         
         force_full_denoise = True
         if return_with_leftover_noise == "enable":
@@ -372,7 +383,7 @@ class UltraCascade_KSamplerAdvanced:
         disable_noise = False
         if add_noise == "disable":
             disable_noise = True
-        return common_ksampler(model, noise_seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, denoise=denoise, disable_noise=disable_noise, start_step=start_at_step, last_step=end_at_step, force_full_denoise=force_full_denoise)
+        return common_ksampler(work_model, noise_seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, denoise=denoise, disable_noise=disable_noise, start_step=start_at_step, last_step=end_at_step, force_full_denoise=force_full_denoise)
 
 
 class UltraCascade_StageC_Tile:

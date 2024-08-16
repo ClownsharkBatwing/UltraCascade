@@ -1,5 +1,7 @@
 # UltraCascade
 
+![ComfyUI_16346_](https://github.com/user-attachments/assets/d6eb29bd-dccc-43e7-ae98-e151d0345fbe)
+
 This is a native adaptation of the UltraPixel model that facilitates the generation of high resolution latents by Stable Cascade by mitigating the tendency toward doubling artifacts and mutations when generating at an largely untrained resolution, by using an image generated at a native resolution as a "guide" (a bit like a good tile controlnet). The original implementation somewhat obscured this fact, as it generated the guide and the high resolution stage C latent within the same node. Here, everything is separated into discrete stages to maximize the creative possibilities and control over fidelity. The basic pipeline is:
 
 Stage C -> Stage UP -> Stage B 

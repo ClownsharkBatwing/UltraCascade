@@ -6,6 +6,12 @@ Stage C -> Stage UP -> Stage B
 
 (followed by VAE decode, which is stage A)
 
+Intriguingly, the ultrapixel_t2i.safetensors file available on the original HuggingFace repo is not actually a safetensors file, but rather a pytorch save (a pickle). I converted it to a legitimate safetensors file: 
+https://huggingface.co/ClownsharkBatwing/ultrapixel_convert/blob/main/ultrapixel_t2i.safetensors
+
+I finetuned stage B lite and highly recommend using it, even in place of the full weights. I've found it generally leads to sharper, more coherent details, with a significant reduction in "nasty Cascade noise". It's available as a checkpoint that contains CLIP and the stage A VAE: 
+https://huggingface.co/ClownsharkBatwing/CSBW_Style/blob/main/cascade_B-lite_refined_CSBW_v1.1.safetensors
+
 This repo contains the code for the models themselves, and implements support for "Self-Attention Guidance" (SAG) in stages C and B. (Support for this in stage B requires replacing the stage_b.py file in your comfy folder with the one available here. The path is comfy/ldm/cascade). It also implements "Random Attention Guidance" (RAG), which is particularly effective for photography styles when specific combinations of positive and negative scales are used. (I recommend +0.2 for stage C and -0.1 for stage UP as a starting point, using DPMPP_SDE_ADVANCED with perlin noise, available in the RES4LYF node pack: https://github.com/ClownsharkBatwing/RES4LYF)
 
 There are UltraCascade KSampler and KSamplerAdvanced nodes included in this repo. It is no longer necessary to use the Cascade Stage B Conditioning nodes, or the ConditioningZeroOut nodes, as the code is included within the samplers themselves. Simply link the output for stage C into the "guide" input of a subsequent sampler, and it'll detect which model type you've hooked up - if it's from the UltraCascade Loader, it'll use stage UP, and if it's a stage B model, it'll use stage B. 

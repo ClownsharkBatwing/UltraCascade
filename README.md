@@ -1,10 +1,18 @@
 # UltraCascade
 
+![ComfyUI_16346_](https://github.com/user-attachments/assets/d6eb29bd-dccc-43e7-ae98-e151d0345fbe)
+
 This is a native adaptation of the UltraPixel model that facilitates the generation of high resolution latents by Stable Cascade by mitigating the tendency toward doubling artifacts and mutations when generating at an largely untrained resolution, by using an image generated at a native resolution as a "guide" (a bit like a good tile controlnet). The original implementation somewhat obscured this fact, as it generated the guide and the high resolution stage C latent within the same node. Here, everything is separated into discrete stages to maximize the creative possibilities and control over fidelity. The basic pipeline is:
 
 Stage C -> Stage UP -> Stage B 
 
 (followed by VAE decode, which is stage A)
+
+Intriguingly, the ultrapixel_t2i.safetensors file available on the original HuggingFace repo is not actually a safetensors file, but rather a pytorch save (a pickle). I converted it to a legitimate safetensors file: 
+https://huggingface.co/ClownsharkBatwing/ultrapixel_convert/blob/main/ultrapixel_t2i.safetensors
+
+I finetuned stage B lite and highly recommend using it, even in place of the full weights. I've found it generally leads to sharper, more coherent details, with a significant reduction in "nasty Cascade noise". It's available as a checkpoint that contains CLIP and the stage A VAE: 
+https://huggingface.co/ClownsharkBatwing/CSBW_Style/blob/main/cascade_B-lite_refined_CSBW_v1.1.safetensors
 
 This repo contains the code for the models themselves, and implements support for "Self-Attention Guidance" (SAG) in stages C and B. (Support for this in stage B requires replacing the stage_b.py file in your comfy folder with the one available here. The path is comfy/ldm/cascade). It also implements "Random Attention Guidance" (RAG), which is particularly effective for photography styles when specific combinations of positive and negative scales are used. (I recommend +0.2 for stage C and -0.1 for stage UP as a starting point, using DPMPP_SDE_ADVANCED with perlin noise, available in the RES4LYF node pack: https://github.com/ClownsharkBatwing/RES4LYF)
 

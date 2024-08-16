@@ -1,0 +1,4 @@
+einops
+numpy
+safetensors
+

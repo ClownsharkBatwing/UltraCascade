@@ -128,7 +128,7 @@ class UltraCascade_CLIPTextEncode:
 class UltraCascade_Loader:
     @classmethod
     def INPUT_TYPES(s):
-        return {"required": { "stage_c_name": (folder_paths.get_filename_list("unet"), ),
+        return {"required": { "stage_c_name" : (folder_paths.get_filename_list("unet"), ),
                               "stage_up_name": (folder_paths.get_filename_list("unet"), ),
                              }}
     RETURN_TYPES = ("MODEL",)
@@ -398,10 +398,10 @@ class UltraCascade_StageC_Tile:
         h_half = x.shape[2] // 2
         w_half = x.shape[3] // 2
         
-        x_0_0 = x[:,:,:h_half,:w_half]
-        x_1_0 = x[:,:,h_half:,:w_half]
-        x_0_1 = x[:,:,:h_half,w_half:]
-        x_1_1 = x[:,:,h_half:,w_half:]
+        x_0_0 = x[:,:, :h_half , :w_half]
+        x_1_0 = x[:,:, h_half: , :w_half]
+        x_0_1 = x[:,:, :h_half , w_half:]
+        x_1_1 = x[:,:, h_half: , w_half:]
         
         return ({'samples': x_0_0}, {'samples': x_1_0},{'samples': x_0_1},{'samples': x_1_1},)
 

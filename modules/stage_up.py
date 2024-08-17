@@ -2,7 +2,6 @@
 
 import torch
 from torch import nn
-import torchvision
 
 from comfy.ldm.cascade.common import AttnBlock, ResBlock, TimestepBlock
 from ..modules.inr_fea_res_lite import TransInr, ScaleNormalize_res
@@ -66,7 +65,7 @@ class StageUP(StageC):
 
 
 
-    def _down_encode(self, x, r_embed, clip, cnet=None, require_q=False, lr_guide=None, r_emb_lite=None, guide_weight=1, pag_patch_flag=False):
+    def _down_encode(self, x, r_embed, clip, cnet=None, require_q=False, lr_guide=None, r_emb_lite=None, guide_weight=1.0, pag_patch_flag=False):
     
         if require_q:
             qs = []
@@ -114,7 +113,42 @@ class StageUP(StageC):
 
 
 
-    def _up_decode(self, level_outputs, r_embed, clip, cnet=None, require_ff=False, agg_f=None, r_emb_lite=None, guide_weight=1, pag_patch_flag=False, sag_func=None): 
+    def sag_attn_proc(self, x, clip, block, sag_func, n_heads=32, dim_head=64):
+        orig_x = x
+
+        extra_options={}
+        extra_options["n_heads"] = n_heads #self.n_heads  32 * 64 = 2048... q v k are b,seq_len,2048
+        extra_options["dim_head"] = dim_head #self.d_head
+        extra_options["attn_precision"] = None # self.attn_precision
+        extra_options["cond_or_uncond"] = [1,0] # self.attn_precision
+        
+        x = block.norm(x)
+        kv = block.kv_mapper(clip)
+        orig_shape = x.shape
+        x = x.view(x.size(0), x.size(1), -1).permute(0, 2, 1)  # Bx4xHxW -> Bx(HxW)x4
+
+        kv = torch.cat([x, kv], dim=1) # unrolled attention blocks here
+        q_ = block.attention.attn.to_q(x)
+        k_ = block.attention.attn.to_k(kv)
+        v_ = block.attention.attn.to_v(kv)
+        x = sag_func(q_, k_, v_, extra_options)
+        x = block.attention.attn.out_proj(x)
+        x = orig_x + x.permute(0, 2, 1).view(*orig_shape)        
+        
+        return x
+    
+    def rag_attn_proc(self, x, clip, block, rag_func=None):
+        #x = torch.randn_like(x).to('cuda')
+
+        #gaussian_blur = torchvision.transforms.GaussianBlur(3, sigma=2.0)
+        #x = gaussian_blur(x)
+        x = block(torch.randn_like(x).to('cuda'), clip) #random query
+        #x = torch.randn_like(x).to('cuda')
+        #x = block(torch.full_like(x, 0.0).to('cuda'), clip)"""
+        
+        return x
+
+    def _up_decode(self, level_outputs, r_embed, clip, cnet=None, require_ff=False, agg_f=None, r_emb_lite=None, guide_weight=1.0, pag_patch_flag=False, sag_func=None): 
         
         if require_ff:
             agg_feas = []
@@ -140,34 +174,11 @@ class StageUP(StageC):
                     elif isinstance(block, AttnBlock) or (hasattr(block, "_fsdp_wrapped_module") and isinstance(block._fsdp_wrapped_module, AttnBlock)):
                         #x = block(x, clip)
                         if i == 0 and j == 0 and k == 2 and sag_func is not None: 
-                            orig_x = x
+                            x = self.sag_attn_proc(x, clip, block, sag_func)
 
-                            extra_options={}
-                            extra_options["n_heads"] = 32 #self.n_heads  32 * 64 = 2048... q v k are b,seq_len,2048
-                            extra_options["dim_head"] = 64 #self.d_head
-                            extra_options["attn_precision"] = None # self.attn_precision
-                            extra_options["cond_or_uncond"] = [1,0] # self.attn_precision
-                            
-                            x = block.norm(x)
-                            kv = block.kv_mapper(clip)
-                            orig_shape = x.shape
-                            x = x.view(x.size(0), x.size(1), -1).permute(0, 2, 1)  # Bx4xHxW -> Bx(HxW)x4
+                        elif i == 0 and j ==0 and k == 2 and pag_patch_flag == True and sag_func == None:
+                            x = self.rag_attn_proc(x, clip, block)
 
-                            kv = torch.cat([x, kv], dim=1) # unrolled attention blocks here
-                            q_ = block.attention.attn.to_q(x)
-                            k_ = block.attention.attn.to_k(kv)
-                            v_ = block.attention.attn.to_v(kv)
-                            x = sag_func(q_, k_, v_, extra_options)
-                            x = block.attention.attn.out_proj(x)
-                            x = orig_x + x.permute(0, 2, 1).view(*orig_shape)
-                        elif i == 0 and j ==0 and k == 2 and pag_patch_flag == True and sag_func == None: # and require_ff == False: # and agg_f is None:
-                            #x = torch.randn_like(x).to('cuda')
-
-                            #gaussian_blur = torchvision.transforms.GaussianBlur(3, sigma=2.0)
-                            #x = gaussian_blur(x)
-                            x = block(torch.randn_like(x).to('cuda'), clip) #random query
-                            #x = torch.randn_like(x).to('cuda')
-                            #x = block(torch.full_like(x, 0.0).to('cuda'), clip)"""
                         else:
                             x = block(x, clip)
                             

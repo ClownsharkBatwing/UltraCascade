@@ -406,8 +406,6 @@ class UltraCascade_StageC_Tile:
         return ({'samples': x_0_0}, {'samples': x_1_0},{'samples': x_0_1},{'samples': x_1_1},)
 
 
-#from . import nodes_sag_rag
-
 NODE_CLASS_MAPPINGS = {
     "UltraCascade_Loader": UltraCascade_Loader,
     "UltraCascade_Set_LR_Guide": UltraCascade_Set_LR_Guide,

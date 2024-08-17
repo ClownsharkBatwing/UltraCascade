@@ -339,7 +339,7 @@ class StageUP(StageC):
         sag_func = to.get('patches_replace', {}).get('attn1', {}).get(('middle', 0, 0), None)
         
         with torch.cuda.amp.autocast(dtype=torch.bfloat16):
-            if patch and patch.x_lr is not None:
+            if patch is not None and patch.x_lr is not None:
                 extra_options = {
                     'model': self,
                     'r': r,
@@ -355,8 +355,8 @@ class StageUP(StageC):
                 }
                 x = patch(x, r, clip_text, clip_text_pooled, clip_img, extra_options)
             else:
-                level_outputs = self._down_encode(x, r_embed, clip, cnet)
-                x = self._up_decode(level_outputs, r_embed, clip, cnet)
+                level_outputs = self._down_encode(x, r_embed, clip, cnet, pag_patch_flag=pag_patch_flag)
+                x = self._up_decode(level_outputs, r_embed, clip, cnet, pag_patch_flag=pag_patch_flag, sag_func=sag_func)
 
             if x.dtype == torch.float32:
                 x = x.to(torch.bfloat16)

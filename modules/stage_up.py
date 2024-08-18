@@ -21,6 +21,8 @@ class StageUP(StageC):
         self.guide_weight=0.5 
         self.guide_weights=None
         self.guide_weights_tmp=None
+        self.sigmas_prev = None
+        self.sigmas_schedule = None
 
         self.c_hidden = c_hidden
         self.blocks = blocks
@@ -41,6 +43,12 @@ class StageUP(StageC):
     def set_guide_weights(self, guide_weights=None):
         self.guide_weights = guide_weights
         self.guide_weights_tmp = guide_weights
+        
+    def set_sigmas_prev(self, sigmas_prev=None):
+        self.sigmas_prev = sigmas_prev
+
+    def set_sigmas_schedule(self, sigmas_schedule=None):
+        self.sigmas_schedule = sigmas_schedule
 
     def _init_extra_parameter(self):
         self.agg_net, self.agg_net_up, self.norm_down_blocks, self.norm_up_blocks = (nn.ModuleList() for _ in range(4))
@@ -215,7 +223,7 @@ class StageUP(StageC):
 
 
     def forward(self, x, r, clip_text, clip_text_pooled, clip_img, control=None, lr_guide=None, require_f=False, require_t=False, guide_weight=1.0, **kwargs):
-        
+        sigmas = kwargs['transformer_options']['sigmas']
         cnet = control #transformer_patches_replace = transformer_options[k]
         
         lr_guide = self.lr_guide
@@ -252,7 +260,8 @@ class StageUP(StageC):
                 
             if self.guide_weights is not None:
                 guide_weight = self.guide_weights_tmp[0].item() 
-                self.guide_weights_tmp = self.guide_weights_tmp[1:]
+                if self.sigmas_prev[0] != sigmas[0] and torch.isin(sigmas[0], self.sigmas_schedule.to(sigmas.device)):
+                    self.guide_weights_tmp = self.guide_weights_tmp[1:]
             else: 
                 guide_weight = r[0].item()
         
@@ -271,6 +280,7 @@ class StageUP(StageC):
                                 agg_f=lr_guide[1] if lr_guide is not None else None,
                                 pag_patch_flag=pag_patch_flag, sag_func=sag_func)
 
+            self.sigmas_prev = sigmas
             return self.clf(x)
 
 

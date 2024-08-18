@@ -34,6 +34,7 @@ class UltraCascadePatch:
         self.guide_weights = guide_weights
         self.guide_type = guide_type
         self.lr_guide = None
+        self.basic_step = 0
 
     def __call__(self, x, r, clip_text, clip_text_pooled, clip_img, extra_options):
         if self.x_lr is None:
@@ -45,7 +46,13 @@ class UltraCascadePatch:
                 self.lr_guide = self.generate_lr_guide(x, r, clip_text, clip_text_pooled, clip_img, extra_options)
 
             if self.guide_weights is not None:
-                guide_weight = self.guide_weights[self.__class__.current_step]
+                if self.basic_step >= 0:
+                    if self.basic_step < len(self.guide_weights):
+                        guide_weight = self.guide_weights[self.basic_step]
+                    else:
+                        guide_weight = self.guide_weights[-1]
+                else:
+                    guide_weight = self.guide_weights[self.__class__.current_step]
             else:
                 guide_weight = r[0].item()
 
@@ -59,13 +66,21 @@ class UltraCascadePatch:
         if x_lr is not None:
             self.x_lr = x_lr
         if guide_weights is not None:
+            # remove the last zero weight if the interval is too large (unpad)
+            if len(guide_weights) > 1:
+                average_interval = sum([guide_weights[i] - guide_weights[i - 1] for i in range(1, len(guide_weights))]) / (len(guide_weights) - 1)
+                if guide_weights[-1] == 0 and abs(guide_weights[-1] - guide_weights[-2]) > average_interval * 1.5:
+                    guide_weights = guide_weights[:-1]
             self.guide_weights = guide_weights
         if guide_type is not None:
             self.guide_type = guide_type
         
         if reset:
             self.lr_guide = None
-            self.current_step = 0
+            self.basic_step = -1
+
+    def set_basic_step(self, basic_step):
+        self.basic_step = basic_step
 
     def generate_lr_guide(self, x, r, clip_text, clip_text_pooled, clip_img, extra_options):
         r_embed = extra_options['r_embed']

@@ -3,6 +3,7 @@ import importlib
 modules_to_import = [
     'UltraCascade.nodes',
     'UltraCascade.nodes_sag_rag',
+    'UltraCascade.nodes_stage_b_patcher'
 ]
 
 NODE_CLASS_MAPPINGS = {}

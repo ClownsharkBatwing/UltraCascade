@@ -11,8 +11,9 @@ Stage C -> Stage UP -> Stage B
 Intriguingly, the ultrapixel_t2i.safetensors file available on the original HuggingFace repo is not actually a safetensors file, but rather a pytorch save (a pickle). I converted it to a legitimate safetensors file: 
 https://huggingface.co/ClownsharkBatwing/ultrapixel_convert/blob/main/ultrapixel_t2i.safetensors
 
-I finetuned stage B lite and highly recommend using it, even in place of the full weights. I've found it generally leads to sharper, more coherent details, with a significant reduction in "nasty Cascade noise". It's available as a checkpoint that contains CLIP and the stage A VAE: 
-https://huggingface.co/ClownsharkBatwing/CSBW_Style/blob/main/cascade_B-lite_refined_CSBW_v1.1.safetensors
+I finetuned stage B lite and highly recommend using it, even in place of the full weights. I've found it generally leads to sharper, more coherent details, with a significant reduction in "nasty Cascade noise": https://huggingface.co/ClownsharkBatwing/Cascade_Stage_B_CSBW_Refined/blob/main/stage_b_lite_CSBW_v1.1.safetensors
+
+It's also available as a checkpoint that contains CLIP and the stage A VAE: https://huggingface.co/ClownsharkBatwing/CSBW_Style/blob/main/cascade_B-lite_refined_CSBW_v1.1.safetensors
 
 This repo contains the code for the models themselves, and implements support for "Self-Attention Guidance" (SAG) in stages C and B. (Support for this in stage B requires replacing the stage_b.py file in your comfy folder with the one available here. The path is comfy/ldm/cascade). It also implements "Random Attention Guidance" (RAG), which is particularly effective for photography styles when specific combinations of positive and negative scales are used. (I recommend +0.2 for stage C and -0.1 for stage UP as a starting point, using DPMPP_SDE_ADVANCED with perlin noise, available in the RES4LYF node pack: https://github.com/ClownsharkBatwing/RES4LYF)
 

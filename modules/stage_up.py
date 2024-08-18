@@ -4,10 +4,20 @@ import torch
 from torch import nn
 import functools
 
-from comfy.samplers import CFGGuider
+import comfy.samplers
 from comfy.ldm.cascade.common import AttnBlock, ResBlock, TimestepBlock
 from ..modules.inr_fea_res_lite import TransInr, ScaleNormalize_res
 from comfy.ldm.cascade.stage_c import StageC
+
+def ultracascade_sampling_hook(func):
+    @functools.wraps(func)
+    def wrapper(self, *args, **kwargs):
+        UltraCascadePatch.increment_basic_step()
+        return func(self, *args, **kwargs)
+    return wrapper
+
+original_sampling_function = comfy.samplers.sampling_function
+comfy.samplers.sampling_function = ultracascade_sampling_hook(original_sampling_function)
 
 def ultracascade_reset_hook(func):
     @functools.wraps(func)
@@ -16,11 +26,12 @@ def ultracascade_reset_hook(func):
         return func(self, *args, **kwargs)
     return wrapper
 
-original_sample = CFGGuider.sample
-CFGGuider.sample = ultracascade_reset_hook(original_sample)
+original_sample = comfy.samplers.CFGGuider.sample
+comfy.samplers.CFGGuider.sample = ultracascade_reset_hook(original_sample)
 
 class UltraCascadePatch:
     current_step = 0
+    basic_step = -1
     x_lr = None
     guide_weights = None
     guide_type = 'residual'
@@ -28,12 +39,17 @@ class UltraCascadePatch:
     @classmethod
     def reset_sampling(cls):
         cls.current_step = 0
+        cls.basic_step = -1
+    
+    @classmethod
+    def increment_basic_step(cls):
+        cls.basic_step += 1
+
     def __init__(self, x_lr, guide_weights, guide_type):
         self.x_lr = x_lr
         self.guide_weights = guide_weights
         self.guide_type = guide_type
         self.lr_guide = None
-        self.basic_step = 0
 
     def __call__(self, x, r, clip_text, clip_text_pooled, clip_img, extra_options):
         if self.x_lr is None:
@@ -45,9 +61,9 @@ class UltraCascadePatch:
                 self.lr_guide = self.generate_lr_guide(x, r, clip_text, clip_text_pooled, clip_img, extra_options)
 
             if self.guide_weights is not None:
-                if self.basic_step >= 0:
-                    if self.basic_step < len(self.guide_weights):
-                        guide_weight = self.guide_weights[self.basic_step]
+                if self.__class__.basic_step >= 0:
+                    if self.__class__.basic_step < len(self.guide_weights):
+                        guide_weight = self.guide_weights[self.__class__.basic_step]
                     else:
                         guide_weight = self.guide_weights[-1]
                 else:
@@ -76,10 +92,7 @@ class UltraCascadePatch:
         
         if reset:
             self.lr_guide = None
-            self.basic_step = -1
-
-    def set_basic_step(self, basic_step):
-        self.basic_step = basic_step
+            self.__class__.basic_step = -1
 
     def generate_lr_guide(self, x, r, clip_text, clip_text_pooled, clip_img, extra_options):
         r_embed = extra_options['r_embed']

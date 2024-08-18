@@ -178,13 +178,13 @@ class UltraCascade_SelfAttentionGuidance:
             sag_scale = scale
             sag_sigma = blur_sigma
             sag_threshold = 1.0
-            model = args["model"]
-            uncond_pred = args["uncond_denoised"]
-            uncond = args["uncond"]
-            cfg_result = args["denoised"]
-            sigma = args["sigma"]
+            model         = args["model"]
+            uncond_pred   = args["uncond_denoised"]
+            uncond        = args["uncond"]
+            cfg_result    = args["denoised"]
+            sigma         = args["sigma"]
             model_options = args["model_options"]
-            x = args["input"]
+            x             = args["input"]
             if min(cfg_result.shape[2:]) <= 4: #skip when too small to add padding
                 return cfg_result
             

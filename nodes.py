@@ -128,7 +128,7 @@ class UltraCascade_CLIPTextEncode:
 class UltraCascade_Loader:
     @classmethod
     def INPUT_TYPES(s):
-        return {"required": { "stage_c_name": (folder_paths.get_filename_list("unet"), ),
+        return {"required": { "stage_c_name" : (folder_paths.get_filename_list("unet"), ),
                               "stage_up_name": (folder_paths.get_filename_list("unet"), ),
                              }}
     RETURN_TYPES = ("MODEL",)
@@ -216,20 +216,24 @@ class UltraCascade_EmptyLatents:
             "height_up": ("INT", {"default": 36, "min": 1, "max": MAX_RESOLUTION, "step": 1}),
             "width_b": ("INT", {"default": 2560, "min": 1, "max": MAX_RESOLUTION, "step": 1}),
             "height_b": ("INT", {"default": 1536, "min": 1, "max": MAX_RESOLUTION, "step": 1}),
+            "transpose": ("BOOLEAN", {"default": False}),
             "batch_size": ("INT", {"default": 1, "min": 1, "max": 4096}),
         }}
     
     RETURN_TYPES = ("LATENT","LATENT","LATENT",)
     RETURN_NAMES = ("latent_c", "latent_up", "latent_b",)
-    FUNCTION = "generate"
+    FUNCTION = "main"
 
     CATEGORY = "latent"
 
-    def generate(self, width_c, height_c, width_up, height_up, width_b, height_b, batch_size):
+    def main(self, width_c, height_c, width_up, height_up, width_b, height_b, transpose, batch_size):
 
-        latent_c = torch.zeros([batch_size, 16, height_c, width_c], device=self.device)
-        latent_up = torch.zeros([batch_size, 16, height_up, width_up], device=self.device)
-        latent_b = torch.zeros([batch_size, 4, height_b // 4, width_b // 4], device=self.device)
+        latent_c  = torch.zeros([batch_size, 16, height_c     , width_c     ], device=self.device)
+        latent_up = torch.zeros([batch_size, 16, height_up    , width_up    ], device=self.device)
+        latent_b  = torch.zeros([batch_size,  4, height_b // 4, width_b // 4], device=self.device)
+        
+        if transpose:
+            latent_c, latent_up, latent_b = [x.permute(0, 1, 3, 2) for x in [latent_c, latent_up, latent_b]]
 
         return ({"samples":latent_c}, {"samples":latent_up}, {"samples":latent_b},)
 
@@ -394,15 +398,13 @@ class UltraCascade_StageC_Tile:
         h_half = x.shape[2] // 2
         w_half = x.shape[3] // 2
         
-        x_0_0 = x[:,:,:h_half,:w_half]
-        x_1_0 = x[:,:,h_half:,:w_half]
-        x_0_1 = x[:,:,:h_half,w_half:]
-        x_1_1 = x[:,:,h_half:,w_half:]
+        x_0_0 = x[:,:, :h_half , :w_half]
+        x_1_0 = x[:,:, h_half: , :w_half]
+        x_0_1 = x[:,:, :h_half , w_half:]
+        x_1_1 = x[:,:, h_half: , w_half:]
         
         return ({'samples': x_0_0}, {'samples': x_1_0},{'samples': x_0_1},{'samples': x_1_1},)
 
-
-#from . import nodes_sag_rag
 
 NODE_CLASS_MAPPINGS = {
     "UltraCascade_Loader": UltraCascade_Loader,

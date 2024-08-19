@@ -226,6 +226,29 @@ class StageB2(nn.Module):
 
         return x
     
+    def pag_attn_proc(self, x, clip, block, rag_func=None):
+        orig_x = x
+        
+        x = block.norm(x)
+        #kv = block.kv_mapper(clip)
+        orig_shape = x.shape
+        x = x.view(x.size(0), x.size(1), -1).permute(0, 2, 1)  # Bx4xHxW -> Bx(HxW)x4
+
+        #kv = torch.cat([x, kv], dim=1) # unrolled attention blocks here
+        #q_ = block.attention.attn.to_q(x)
+        #k_ = block.attention.attn.to_k(kv)
+        #v_ = block.attention.attn.to_v(kv)
+        x_q = block.attention.attn.to_q(x)
+        x_k = block.attention.attn.to_k(x)
+        x_v = block.attention.attn.to_v(x)
+        x   = block.attention.attn.out_proj(x_v)
+        
+        #x = sag_func(q_, k_, v_, extra_options)
+        #x = block.attention.attn.out_proj(x)
+        x = orig_x + x.permute(0, 2, 1).view(*orig_shape)        
+        
+        return x
+    
     def rag_attn_proc(self, x, clip, block, rag_func=None):
         #x = torch.randn_like(x).to('cuda')
 
@@ -233,7 +256,7 @@ class StageB2(nn.Module):
         #x = gaussian_blur(x)
         x = block(torch.randn_like(x).to('cuda'), clip) #random query
         #x = torch.randn_like(x).to('cuda')
-        #x = block(torch.full_like(x, 0.0).to('cuda'), clip)"""
+        #x = block(torch.full_like(x, 0.0).to('cuda'), clip)
         
         return x
 
@@ -253,8 +276,10 @@ class StageB2(nn.Module):
                         
                         if i == 0 and j ==0 and k == 2 and sag_func != None: 
                             x = self.sag_attn_proc(x, clip, block, sag_func)
-                        elif i == 0 and j ==0 and k == 2 and pag_patch_flag == True and sag_func == None: 
+                        elif i == 0 and j ==0 and k == 2 and pag_patch_flag == "rag" and sag_func == None:
                             x = self.rag_attn_proc(x, clip, block)
+                        elif i == 0 and j ==0 and k == 2 and pag_patch_flag == "pag" and sag_func == None:
+                            x = self.pag_attn_proc(x, clip, block)
                         else:
                             x = block(x, clip)
                         
@@ -307,6 +332,14 @@ class StageB2(nn.Module):
             
         x = x + nn.functional.interpolate(self.pixels_mapper(pixels), size=x.shape[-2:], mode='bilinear', align_corners=True)
         level_outputs = self._down_encode(x, r_embed, clip)
+        
+        pag_patch_flag=""
+        if 'patches_replace' in kwargs['transformer_options']:
+            if "attn1" in kwargs['transformer_options']['patches_replace']:
+                pag_patch_flag = "rag"
+            if "attn1_pag" in kwargs['transformer_options']['patches_replace']:
+                pag_patch_flag = "pag"
+        
         pag_patch_flag = True if 'patches_replace' in kwargs['transformer_options'] else False
         sag_func = (kwargs.get('transformer_options', {}).get('patches_replace', {}).get('attn1', {}).get(('middle', 0, 0), None))
         x = self._up_decode(level_outputs, r_embed, clip, pag_patch_flag=pag_patch_flag, sag_func=sag_func)

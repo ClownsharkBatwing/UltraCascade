@@ -145,6 +145,29 @@ class StageUP(StageC):
         
         return x
     
+    def pag_attn_proc(self, x, clip, block, pag_func=None):
+        orig_x = x
+        
+        x = block.norm(x)
+        #kv = block.kv_mapper(clip)
+        orig_shape = x.shape
+        x = x.view(x.size(0), x.size(1), -1).permute(0, 2, 1)  # Bx4xHxW -> Bx(HxW)x4
+
+        #kv = torch.cat([x, kv], dim=1) # unrolled attention blocks here
+        #q_ = block.attention.attn.to_q(x)
+        #k_ = block.attention.attn.to_k(kv)
+        #v_ = block.attention.attn.to_v(kv)
+        x_q = block.attention.attn.to_q(x)
+        x_k = block.attention.attn.to_k(x)
+        x_v = block.attention.attn.to_v(x)
+        x   = block.attention.attn.out_proj(x_v)
+        
+        #x = sag_func(q_, k_, v_, extra_options)
+        #x = block.attention.attn.out_proj(x)
+        x = orig_x + x.permute(0, 2, 1).view(*orig_shape)        
+        
+        return x
+    
     def rag_attn_proc(self, x, clip, block, rag_func=None):
         #x = torch.randn_like(x).to('cuda')
 
@@ -152,7 +175,7 @@ class StageUP(StageC):
         #x = gaussian_blur(x)
         x = block(torch.randn_like(x).to('cuda'), clip) #random query
         #x = torch.randn_like(x).to('cuda')
-        #x = block(torch.full_like(x, 0.0).to('cuda'), clip)"""
+        #x = block(torch.full_like(x, 0.0).to('cuda'), clip)
         
         return x
 
@@ -184,11 +207,14 @@ class StageUP(StageC):
                         if i == 0 and j == 0 and k == 2 and sag_func is not None: 
                             x = self.sag_attn_proc(x, clip, block, sag_func)
 
-                        elif i == 0 and j ==0 and k == 2 and pag_patch_flag == True and sag_func == None:
+                        elif i == 0 and j ==0 and k == 2 and pag_patch_flag == "rag" and sag_func == None:
                             x = self.rag_attn_proc(x, clip, block)
+                            
+                        elif i == 0 and j ==0 and k == 2 and pag_patch_flag == "pag" and sag_func == None:
+                            x = self.pag_attn_proc(x, clip, block)
 
                         else:
-                            x = block(x, clip)
+                            x = block(x, clip) #self.heads = 32 in common.py OptimizedAttention()
                             
                         if require_ff and (k == 2):
                             agg_feas.append(x.clone())
@@ -265,12 +291,18 @@ class StageUP(StageC):
             else: 
                 guide_weight = r[0].item()
         
-            pag_patch_flag = True if 'patches_replace' in kwargs['transformer_options'] else False
+            pag_patch_flag=""
+            if 'patches_replace' in kwargs['transformer_options']:
+                if "attn1" in kwargs['transformer_options']['patches_replace']:
+                    pag_patch_flag = "rag"
+                if "attn1_pag" in kwargs['transformer_options']['patches_replace']:
+                    pag_patch_flag = "pag"
+        
+            #pag_patch_flag = True if 'patches_replace' in kwargs['transformer_options'] else False
+            pag_patch_func = kwargs['transformer_options']['patches_replace'].get("attn1", {}) if 'patches_replace' in kwargs['transformer_options'] else False
+            pag_func = kwargs.get('transformer_options', {}).get('patches_replace', {}).get('attn1', {})
             #sag_func = kwargs['transformer_options']['patches_replace']['attn1'][('middle',0,0)] if 'patches_replace' in kwargs['transformer_options'] else None
-            sag_func = (kwargs.get('transformer_options', {})
-                              .get('patches_replace', {})
-                              .get('attn1', {})
-                              .get(('middle', 0, 0), None))
+            sag_func = (kwargs.get('transformer_options', {}).get('patches_replace', {}).get('attn1', {}).get(('middle', 0, 0), None))
             
             level_outputs = self._down_encode(x, r_embed, clip, cnet, require_q=require_f, r_emb_lite=self.gen_r_embedding(r),  guide_weight=guide_weight,
                                             lr_guide=lr_guide[0] if lr_guide is not None else None,

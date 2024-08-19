@@ -248,14 +248,124 @@ class UltraCascade_RandomAttentionGuidance:
         return (m,)
 
 
+class UltraCascade_PerturbedAttentionGuidance:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "model": ("MODEL",),
+                "scale": ("FLOAT", {"default": 3.0, "min": -100.0, "max": 100.0, "step": 0.1, "round": 0.01}),
+            }
+        }
+
+    RETURN_TYPES = ("MODEL",)
+    FUNCTION = "main"
+
+    CATEGORY = "UltraCascade"
+
+    def main(self, model, scale):
+        unet_block = "middle"
+        unet_block_id = 0
+        m = model.clone()
+
+        def perturbed_attention(q, k, v, extra_options, mask=None):
+            return None
+
+        def post_cfg_function(args):
+            model = args["model"]
+            cond_pred = args["cond_denoised"]
+            cond = args["cond"]
+            cfg_result = args["denoised"]
+            sigma = args["sigma"]
+            model_options = args["model_options"].copy()
+            x = args["input"]
+
+            if scale == 0:
+                return cfg_result
+
+            model_options = comfy.model_patcher.set_model_options_patch_replace(model_options, perturbed_attention, "attn1_pag", unet_block, unet_block_id)
+            (pag,) = comfy.samplers.calc_cond_batch(model, [cond], x, sigma, model_options)
+
+            return cfg_result + (cond_pred - pag) * scale
+
+        m.set_model_sampler_post_cfg_function(post_cfg_function)
+
+        return (m,)
+
+
+
+class UltraCascade_AttentionGuidance_Block:
+    def forward(self, blah):
+        return None
+
+class UltraCascade_AttentionGuidance:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "model": ("MODEL",),
+                "mode": (["PAG", "RAG"], ),
+                "x_q": ("FLOAT", {"default": 0.0, "min": -100.0, "max": 100.0, "step": 0.1}),
+                "x_k": ("FLOAT", {"default": 0.0, "min": -100.0, "max": 100.0, "step": 0.1}),
+                "x_v": ("FLOAT", {"default": 0.0, "min": -100.0, "max": 100.0, "step": 0.1}),
+                
+                "x_q_eta": ("FLOAT", {"default": 0.0, "min": -100.0, "max": 100.0, "step": 0.1}),
+                "x_k_eta": ("FLOAT", {"default": 0.0, "min": -100.0, "max": 100.0, "step": 0.1}),
+                "x_v_eta": ("FLOAT", {"default": 0.0, "min": -100.0, "max": 100.0, "step": 0.1}),
+                
+                "scale": ("FLOAT", {"default": 3.0, "min": -100.0, "max": 100.0, "step": 0.1}),
+            }
+        }
+
+    RETURN_TYPES = ("MODEL",)
+    FUNCTION = "main"
+
+    CATEGORY = "UltraCascade"
+
+    def main(self, model, scale):
+        unet_block = "middle"
+        unet_block_id = 0
+        m = model.clone()
+
+        def random_attention(q, k, v, extra_options, mask=None):
+            return None
+
+        def post_cfg_function(args):
+            model = args["model"]
+            cond_pred = args["cond_denoised"]
+            cond = args["cond"]
+            cfg_result = args["denoised"]
+            sigma = args["sigma"]
+            model_options = args["model_options"].copy()
+            x = args["input"]
+
+            if scale == 0:
+                return cfg_result
+
+            attn_g_block = UltraCascade_AttentionGuidance_Block()
+
+            model_options = comfy.model_patcher.set_model_options_patch_replace(model_options, attn_g_block, "attn1", unet_block, unet_block_id)
+            (rag,) = comfy.samplers.calc_cond_batch(model, [cond], x, sigma, model_options)
+
+            return cfg_result + (cond_pred - rag) * scale
+
+        m.set_model_sampler_post_cfg_function(post_cfg_function)
+
+        return (m,)
+
+
+
+
 NODE_CLASS_MAPPINGS = {
     "UltraCascade_SelfAttentionGuidance": UltraCascade_SelfAttentionGuidance,
     "UltraCascade_RandomAttentionGuidance": UltraCascade_RandomAttentionGuidance,
+    "UltraCascade_PerturbedAttentionGuidance": UltraCascade_PerturbedAttentionGuidance,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "UltraCascade_SelfAttentionGuidance": "UltraCascade Self-Attention Guidance",
     "UltraCascade_RandomAttentionGuidance": "UltraCascade Random Attention Guidance",
+    "UltraCascade_PerturbedAttentionGuidance": "UltraCascade Perturbed Attention Guidance",
 }
 
 

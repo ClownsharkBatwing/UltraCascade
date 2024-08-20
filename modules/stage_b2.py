@@ -340,7 +340,7 @@ class StageB2(nn.Module):
             if "attn1_pag" in kwargs['transformer_options']['patches_replace']:
                 pag_patch_flag = "pag"
         
-        pag_patch_flag = True if 'patches_replace' in kwargs['transformer_options'] else False
+        # pag_patch_flag = True if 'patches_replace' in kwargs['transformer_options'] else False
         sag_func = (kwargs.get('transformer_options', {}).get('patches_replace', {}).get('attn1', {}).get(('middle', 0, 0), None))
         x = self._up_decode(level_outputs, r_embed, clip, pag_patch_flag=pag_patch_flag, sag_func=sag_func)
         

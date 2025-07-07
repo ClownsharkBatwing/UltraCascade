@@ -1,12 +1,16 @@
 import folder_paths
 from .loader import load_UltraCascade
 from nodes import common_ksampler
+from typing import Optional, Callable, Tuple, Dict, Any, Union
 
+import copy
 import torch
 import comfy.clip_vision
 import comfy.model_management
 
 import itertools
+
+from .style_transfer import StyleCascadeC_Model
 
 MAX_RESOLUTION=8192
 
@@ -536,40 +540,474 @@ def parse_range_string(s):
         result.append(val)
     return result
 
+def parse_range_string_int(s):
+    if "all" in s:
+        return AlwaysTrueList()
+    
+    result = []
+    for part in s.split(','):
+        if '-' in part:
+            start, end = part.split('-')
+            result.extend(range(int(start), int(end) + 1))
+        elif part.strip() != '':
+            result.append(int(part))
+    return result
+
+
+
+STYLE_MODES = [
+    "none", 
+    #"sinkhornsort",
+    "scattersort_dir", 
+    "scattersort_dir2",
+    "scattersort", 
+    "tiled_scattersort",
+    "AdaIN", 
+    "tiled_AdaIN", 
+    "WCT",
+    "WCT2",
+    "injection",
+]
+
+CASCADE_BLOCK_TYPES = [
+    "input", 
+    "middle", 
+    "output",
+    "input,middle",
+    "input,output",
+    "middle,output",
+    "input,middle,output",
+]
+
+
+
+
+class ClownStyle_CascadeC:
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required":
+                    {
+                    "mode":        (STYLE_MODES, {"default": "scattersort"},),
+
+                    "proj_in":     ("FLOAT", {"default": 0.0, "min": -100.0, "max": 100.0, "step":0.01, "round": False, "tooltip": "Strength of effect on layer; skips extra calculation if set to 0.0. Skips interpolation if set to 1.0."}),
+                    "proj_out":    ("FLOAT", {"default": 0.0, "min": -100.0, "max": 100.0, "step":0.01, "round": False, "tooltip": "Strength of effect on layer; skips extra calculation if set to 0.0. Skips interpolation if set to 1.0."}),
+
+                    "tile_h" :     ("INT",   {"default": 128, "min": 16, "max": 10000, "step": 16, "tooltip": "Tile size for tiled modes. Lower values will transfer composition more effectively. Dimensions of image must be divisible by this value."}),
+                    "tile_w" :     ("INT",   {"default": 128, "min": 16, "max": 10000, "step": 16, "tooltip": "Tile size for tiled modes. Lower values will transfer composition more effectively. Dimensions of image must be divisible by this value."}),
+
+                    #"start_step": ("INT", {"default": 0, "min": 16, "max": 10000, "step": 1, "tooltip": "Start step for data shock."}),
+                    #"end_step"  : ("INT", {"default": 1, "min": 16, "max": 10000, "step": 1, "tooltip": "End step for data shock."}),
+
+                    "invert_mask": ("BOOLEAN", {"default": False}),
+                    },
+                "optional": 
+                    {
+                    "positive" :   ("CONDITIONING", ),
+                    "negative" :   ("CONDITIONING", ),
+                    "guide":       ("LATENT", ),
+                    "mask":        ("MASK", ),
+                    "blocks":      ("BLOCKS", ),
+                    "guides":      ("GUIDES", ),
+                    }  
+                }
+    
+    RETURN_TYPES = ("GUIDES",)
+    RETURN_NAMES = ("guides",)
+    FUNCTION     = "main"
+    CATEGORY     = "RES4LYF/sampler_extensions"
+
+    def main(self,
+            mode        = "scattersort",
+
+            proj_in     = 0.0,
+            proj_out    = 0.0,
+            tile_h      = 128,
+            tile_w      = 128,
+            invert_mask = False,
+            positive    = None,
+            negative    = None,
+            guide       = None,
+            mask        = None,
+            blocks      = None,
+            guides      = None,
+            ):
+        
+        #mask = 1-mask if mask is not None else None
+
+        if guide is not None:
+            raw_x = guide.get('state_info', {}).get('raw_x', None)
+            if raw_x is not None:
+                guide = {'samples': guide['state_info']['raw_x'].clone()}
+            else:
+                guide = {'samples': guide['samples'].clone()}
+        
+        guides = copy.deepcopy(guides) if guides is not None else {}
+        blocks = copy.deepcopy(blocks) if blocks is not None else {}
+
+        StyleMMDiT = blocks.get('StyleMMDiT')
+        
+        if StyleMMDiT is None:
+            StyleMMDiT = StyleCascadeC_Model()
+        
+        weights = {
+            "proj_in" : proj_in,
+            "proj_out": proj_out,
+            
+            "h_tile"  : tile_h // 8,
+            "w_tile"  : tile_w // 8,
+        }
+
+        StyleMMDiT.set_mode(mode)
+        StyleMMDiT.set_weights(**weights)
+        StyleMMDiT.set_conditioning(positive, negative)
+        StyleMMDiT.mask = [mask]
+        StyleMMDiT.guides = [guide]
+        
+        StyleMMDiT_ = guides.get('StyleMMDiT')
+        if StyleMMDiT_ is not None:
+            StyleMMDiT_.merge_weights(StyleMMDiT)
+        else:
+            StyleMMDiT_ = StyleMMDiT
+
+        guides['StyleMMDiT'] = StyleMMDiT_
+
+        return (guides, )
+
+
+class ClownStyle_Block_CascadeC:
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required":
+                    {
+                    "mode":          (STYLE_MODES, {"default": "scattersort"},),
+                    #"apply_to":      (["img", "img+txt","img,txt", "txt",], {"default": "img+txt"},),
+                    "block_type":    (CASCADE_BLOCK_TYPES, {"default": "input"},),
+                    "block_list":    ("STRING", {"default": "all", "multiline": True}),
+                    "block_weights": ("STRING", {"default": "1.0", "multiline": True}),
+                    
+                    "res": ("FLOAT",  {"default": 0.0, "min": -100.0, "max": 100.0, "step":0.01, "round": False, "tooltip": "Strength of effect on layer; skips extra calculation if set to 0.0. Skips interpolation if set to 1.0."}),
+                    "timestep":      ("FLOAT",  {"default": 0.0, "min": -100.0, "max": 100.0, "step":0.01, "round": False, "tooltip": "Strength of effect on layer; skips extra calculation if set to 0.0. Skips interpolation if set to 1.0."}),
+                    "attn":  ("FLOAT",  {"default": 0.0, "min": -100.0, "max": 100.0, "step":0.01, "round": False, "tooltip": "Strength of effect on layer; skips extra calculation if set to 0.0. Skips interpolation if set to 1.0."}),
+
+                    "tile_h":        ("INT",    {"default": 128, "min": 16, "max": 10000, "step": 16, "tooltip": "Tile size for tiled modes. Lower values will transfer composition more effectively. Dimensions of image must be divisible by this value."}),
+                    "tile_w":        ("INT",    {"default": 128, "min": 16, "max": 10000, "step": 16, "tooltip": "Tile size for tiled modes. Lower values will transfer composition more effectively. Dimensions of image must be divisible by this value."}),
+
+                    "invert_mask":   ("BOOLEAN",{"default": False}),
+                    },
+                "optional": 
+                    {
+                    "mask":        ("MASK", ),
+                    "blocks":      ("BLOCKS", ),
+                    }  
+                }
+    
+    RETURN_TYPES = ("BLOCKS",)
+    RETURN_NAMES = ("blocks",)
+    FUNCTION     = "main"
+    CATEGORY     = "RES4LYF/sampler_extensions"
+
+    def main(self,
+            mode        = "scattersort",
+            noise_mode  = "update",
+            apply_to    = "",
+            block_type  = "input",
+            block_list    = "all",
+            block_weights = "1.0",
+            
+            res      = 0.0,
+            timestep = 0.0,
+            attn     = 0.0,
+
+            tile_h      = 128,
+            tile_w      = 128,
+
+            invert_mask = False,
+
+            mask        = None,
+            blocks      = None,
+            ):
+        
+        #mask = 1-mask if mask is not None else None
+
+        blocks = copy.deepcopy(blocks) if blocks is not None else {}
+        
+        block_weights = parse_range_string(block_weights)
+        
+        if len(block_weights) == 0:
+            block_weights.append(0.0)
+            
+        if len(block_weights) == 1:
+            block_weights = block_weights * 100
+            
+        if type(block_weights[0]) == int:
+            block_weights = [float(val) for val in block_weights]
+        
+        if    "all" in block_list:
+            block_list = [val for val in range(100)]
+            if len(block_weights) == 1:
+                block_weights = [block_weights[0]] * 100
+        elif "even" in block_list:
+            block_list = [val for val in range(0, 100, 2)]
+            if len(block_weights) == 1:
+                block_weights = [block_weights[0]] * 100
+        elif  "odd" in block_list:
+            block_list = [val for val in range(1, 100, 2)]
+            if len(block_weights) == 1:
+                block_weights = [block_weights[0]] * 100
+        else:
+            block_list  = parse_range_string_int(block_list)
+            
+            weights_expanded = [0.0] * 100
+            for b, w in zip(block_list, block_weights):
+                weights_expanded[b] = w
+            block_weights = weights_expanded
+        
+        StyleMMDiT = blocks.get('StyleMMDiT')
+        if StyleMMDiT is None:
+            StyleMMDiT = StyleCascadeC_Model()
+        
+        weights = {
+            "res":      res,
+            "timestep": timestep,
+            "attn":     attn,
+
+            "h_tile"       : tile_h // 16,
+            "w_tile"       : tile_w // 16,
+        }
+        
+        block_types = block_type.split(",")
+        
+        for block_type in block_types:
+        
+            if   block_type == "input":
+                style_blocks = StyleMMDiT.input_blocks
+            elif block_type == "middle":
+                style_blocks = StyleMMDiT.middle_blocks
+            elif block_type == "output":
+                style_blocks = StyleMMDiT.output_blocks
+                
+            for bid in block_list:
+                block = style_blocks[bid]
+                scaled_weights = {
+                    k: (v * block_weights[bid]) if isinstance(v, float) else v
+                    for k, v in weights.items()
+                }
+
+                block.set_mode(mode)
+                block.set_weights(**scaled_weights)
+                block.apply_to = [apply_to]
+
+                block.mask = [mask]
+
+        blocks['StyleMMDiT'] = StyleMMDiT
+
+        return (blocks, )
+
+
+
+
+
+
+class ClownStyle_Attn_CascadeC:
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required":
+                    {
+                    "mode":          (STYLE_MODES, {"default": "scattersort"},),
+                    "apply_to":      (["self","self,cross","cross"], {"default": "self"},),
+                    "block_type":    (CASCADE_BLOCK_TYPES, {"default": "input"},),
+                    "block_list":    ("STRING", {"default": "all", "multiline": True}),
+                    "block_weights": ("STRING", {"default": "1.0", "multiline": True}),
+                    
+                    "attn_norm": ("FLOAT", {"default": 0.0, "min": -100.0, "max": 100.0, "step":0.01, "round": False, "tooltip": "Strength of effect on layer; skips extra calculation if set to 0.0. Skips interpolation if set to 1.0."}),
+                    
+                    "q_proj": ("FLOAT", {"default": 0.0, "min": -100.0, "max": 100.0, "step":0.01, "round": False, "tooltip": "Strength of effect on layer; skips extra calculation if set to 0.0. Skips interpolation if set to 1.0."}),
+                    "k_proj": ("FLOAT", {"default": 0.0, "min": -100.0, "max": 100.0, "step":0.01, "round": False, "tooltip": "Strength of effect on layer; skips extra calculation if set to 0.0. Skips interpolation if set to 1.0."}),
+                    "v_proj": ("FLOAT", {"default": 0.0, "min": -100.0, "max": 100.0, "step":0.01, "round": False, "tooltip": "Strength of effect on layer; skips extra calculation if set to 0.0. Skips interpolation if set to 1.0."}),
+
+                    "attn":    ("FLOAT", {"default": 0.0, "min": -100.0, "max": 100.0, "step":0.01, "round": False, "tooltip": "Strength of effect on layer; skips extra calculation if set to 0.0. Skips interpolation if set to 1.0."}),
+
+                    "out":    ("FLOAT", {"default": 0.0, "min": -100.0, "max": 100.0, "step":0.01, "round": False, "tooltip": "Strength of effect on layer; skips extra calculation if set to 0.0. Skips interpolation if set to 1.0."}),
+
+                    "tile_h": ("INT",   {"default": 128, "min": 16, "max": 10000, "step": 16, "tooltip": "Tile size for tiled modes. Lower values will transfer composition more effectively. Dimensions of image must be divisible by this value."}),
+                    "tile_w": ("INT",   {"default": 128, "min": 16, "max": 10000, "step": 16, "tooltip": "Tile size for tiled modes. Lower values will transfer composition more effectively. Dimensions of image must be divisible by this value."}),
+
+                    "invert_mask":   ("BOOLEAN", {"default": False}),
+                    },
+                "optional": 
+                    {
+                    "mask":   ("MASK", ),
+                    "blocks": ("BLOCKS", ),
+                    }  
+                }
+    
+    RETURN_TYPES = ("BLOCKS",)
+    RETURN_NAMES = ("blocks",)
+    FUNCTION     = "main"
+    CATEGORY     = "RES4LYF/sampler_extensions"
+
+    def main(self,
+            mode        = "scattersort",
+            noise_mode  = "update",
+            apply_to    = "self",
+            block_type  = "input",
+            block_list    = "all",
+            block_weights = "1.0",
+            
+            attn_norm = 0.0,
+            q_proj = 0.0,
+            k_proj = 0.0,
+            v_proj = 0.0,
+            attn   = 0.0,
+            out    = 0.0,
+            
+            tile_h = 128,
+            tile_w = 128,
+
+            invert_mask = False,
+
+            mask        = None,
+            blocks      = None,
+            ):
+        
+        #mask = 1-mask if mask is not None else None
+
+        blocks = copy.deepcopy(blocks) if blocks is not None else {}
+        
+        block_weights = parse_range_string(block_weights)
+        
+        if len(block_weights) == 0:
+            block_weights.append(0.0)
+            
+        if len(block_weights) == 1:
+            block_weights = block_weights * 100
+            
+        if type(block_weights[0]) == int:
+            block_weights = [float(val) for val in block_weights]
+        
+        if "all" in block_list:
+            block_list = [val for val in range(100)]
+            if len(block_weights) == 1:
+                block_weights = [block_weights[0]] * 100
+        elif "even" in block_list:
+            block_list = [val for val in range(0, 100, 2)]
+            if len(block_weights) == 1:
+                block_weights = [block_weights[0]] * 100
+        elif "odd" in block_list:
+            block_list = [val for val in range(1, 100, 2)]
+            if len(block_weights) == 1:
+                block_weights = [block_weights[0]] * 100
+        else:
+            block_list  = parse_range_string_int(block_list)
+            
+            weights_expanded = [0.0] * 100
+            for b, w in zip(block_list, block_weights):
+                weights_expanded[b] = w
+            block_weights = weights_expanded
+        
+        StyleMMDiT = blocks.get('StyleMMDiT')
+        if StyleMMDiT is None:
+            StyleMMDiT = StyleCascadeC_Model()
+        
+        weights = {
+            "attn_norm": attn_norm,
+            "q_proj": q_proj,
+            "k_proj": k_proj,
+            "v_proj": v_proj,
+            "attn"  : attn,
+            "out"   : out,
+            
+            "h_tile": tile_h // 8,
+            "w_tile": tile_w // 8,
+        }
+        
+        block_types = block_type.split(",")
+        
+        for block_type in block_types:
+            
+            if   block_type == "input":
+                style_blocks = StyleMMDiT.input_blocks
+            elif block_type == "middle":
+                style_blocks = StyleMMDiT.middle_blocks
+            elif block_type == "output":
+                style_blocks = StyleMMDiT.output_blocks
+            
+            for bid in block_list:
+                block = style_blocks[bid]
+                scaled_weights = {
+                    k: (v * block_weights[bid]) if isinstance(v, float) else v
+                    for k, v in weights.items()
+                }
+                
+                block.attn_block.set_mode(mode)
+                block.attn_block.set_weights(**scaled_weights)
+                block.attn_block.apply_to = [apply_to]
+
+                ##for tfmr_block in block.spatial_block.TFMR:
+                #tfmr_block = block.spatial_block.TFMR
+                #if "self" in apply_to:
+                #    tfmr_block.ATTN1.set_mode(mode)
+                #    tfmr_block.ATTN1.set_weights(**scaled_weights)
+                #    tfmr_block.ATTN1.apply_to = [apply_to]
+
+                #if "cross" in apply_to:
+                #    tfmr_block.ATTN2.set_mode(mode)
+                #    tfmr_block.ATTN2.set_weights(**scaled_weights)
+                #    tfmr_block.ATTN2.apply_to = [apply_to]
+                
+                block.attn_mask = [mask]
+
+        blocks['StyleMMDiT'] = StyleMMDiT
+
+        return (blocks, )
+
+
+
+
+
+
+
 
     
 
 NODE_CLASS_MAPPINGS = {
-    "UltraCascade_Loader": UltraCascade_Loader,
-    "UltraCascade_Set_LR_Guide": UltraCascade_Set_LR_Guide,
-    "UltraCascade_Clear_LR_Guide": UltraCascade_Clear_LR_Guide,
-    "UltraCascade_Init": UltraCascade_Init,
-    "UltraCascade_Stage_B": UltraCascade_Stage_B,
-    "UltraCascade_CLIPTextEncode": UltraCascade_CLIPTextEncode,
-    "UltraCascade_ClipVision": UltraCascade_ClipVision,
-    "UltraCascade_EmptyLatents": UltraCascade_EmptyLatents,
-    "UltraCascade_KSampler": UltraCascade_KSampler,
-    "UltraCascade_KSamplerAdvanced": UltraCascade_KSamplerAdvanced,
-    "UltraCascade_StageC_Tile": UltraCascade_StageC_Tile,
-    "UltraCascade_StageC_VAEEncode_Exact": UltraCascade_StageC_VAEEncode_Exact,
-    "UltraCascade_StageC_VAEEncode_Exact_Tiled": UltraCascade_StageC_VAEEncode_Exact_Tiled,
+    "UltraCascade_Loader"                       : UltraCascade_Loader,
+    "UltraCascade_Set_LR_Guide"                 : UltraCascade_Set_LR_Guide,
+    "UltraCascade_Clear_LR_Guide"               : UltraCascade_Clear_LR_Guide,
+    "UltraCascade_Init"                         : UltraCascade_Init,
+    "UltraCascade_Stage_B"                      : UltraCascade_Stage_B,
+    "UltraCascade_CLIPTextEncode"               : UltraCascade_CLIPTextEncode,
+    "UltraCascade_ClipVision"                   : UltraCascade_ClipVision,
+    "UltraCascade_EmptyLatents"                 : UltraCascade_EmptyLatents,
+    "UltraCascade_KSampler"                     : UltraCascade_KSampler,
+    "UltraCascade_KSamplerAdvanced"             : UltraCascade_KSamplerAdvanced,
+    "UltraCascade_StageC_Tile"                  : UltraCascade_StageC_Tile,
+    "UltraCascade_StageC_VAEEncode_Exact"       : UltraCascade_StageC_VAEEncode_Exact,
+    "UltraCascade_StageC_VAEEncode_Exact_Tiled" : UltraCascade_StageC_VAEEncode_Exact_Tiled,
+
+    "ClownStyle_Block_CascadeC"                 : ClownStyle_Block_CascadeC,
+    "ClownStyle_Attn_CascadeC"                  : ClownStyle_Attn_CascadeC,
+    "ClownStyle_CascadeC"                       : ClownStyle_CascadeC,
 
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "UltraCascade_Loader": "UltraCascade Loader",
-    "UltraCascade_Set_LR_Guide": "UltraCascade Set LR Guide",
-    "UltraCascade_Clear_LR_Guide": "UltraCascade Clear LR Guide",
-    "UltraCascade_Init": "UltraCascade Init",
-    "UltraCascade_Stage_B": "UltraCascade Stage B",
-    "UltraCascade_CLIPTextEncode": "UltraCascade CLIP Text Encode",
-    "UltraCascade_ClipVision": "UltraCascade ClipVision",
-    "UltraCascade_EmptyLatents": "UltraCascade EmptyLatents",
-    "UltraCascade_KSampler": "UltraCascade KSampler",
-    "UltraCascade_KSamplerAdvanced": "UltraCascade KSamplerAdvanced",
-    "UltraCascade_StageC_Tile": "UltraCascade Stage C Tile",
-    "UltraCascade_StageC_VAEEncode_Exact": "UltraCascade StageC VAE Encode Exact",
-    "UltraCascade_StageC_VAEEncode_Exact Tiled": "UltraCascade StageC VAE Encode Exact Tiled",
+    "UltraCascade_Loader"                       : "UltraCascade Loader",
+    "UltraCascade_Set_LR_Guide"                 : "UltraCascade Set LR Guide",
+    "UltraCascade_Clear_LR_Guide"               : "UltraCascade Clear LR Guide",
+    "UltraCascade_Init"                         : "UltraCascade Init",
+    "UltraCascade_Stage_B"                      : "UltraCascade Stage B",
+    "UltraCascade_CLIPTextEncode"               : "UltraCascade CLIP Text Encode",
+    "UltraCascade_ClipVision"                   : "UltraCascade ClipVision",
+    "UltraCascade_EmptyLatents"                 : "UltraCascade EmptyLatents",
+    "UltraCascade_KSampler"                     : "UltraCascade KSampler",
+    "UltraCascade_KSamplerAdvanced"             : "UltraCascade KSamplerAdvanced",
+    "UltraCascade_StageC_Tile"                  : "UltraCascade Stage C Tile",
+    "UltraCascade_StageC_VAEEncode_Exact"       : "UltraCascade StageC VAE Encode Exact",
+    "UltraCascade_StageC_VAEEncode_Exact Tiled" : "UltraCascade StageC VAE Encode Exact Tiled",
 
 }
 

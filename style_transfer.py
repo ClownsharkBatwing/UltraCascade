@@ -475,15 +475,14 @@ class Retrojector:
         #    self.b = torch.zeros(bias_size, dtype=pinv_dtype, device=self.W_inv.device)
         #else:
         #    self.b = proj.bias.data.to(dtype=pinv_dtype).to(self.W_inv.device)
-        
+    
     def embed(self, img: torch.Tensor):
-        self.h = img.shape[-2] #// self.patch_size
-        self.w = img.shape[-1] #// self.patch_size
+        self.h = img.shape[-2] // self.embedder[0].downscale_factor #// self.patch_size
+        self.w = img.shape[-1] // self.embedder[0].downscale_factor #// self.patch_size
         self.orig_shape = img.shape
+        embed = self.embedder[1](self.embedder[0](img.to(self.embedder[1].weight.data)))
         
-        embed = self.embedder[1](self.embedder[0](img.to(torch.bfloat16)))
-        
-        return rearrange(embed, "B C H W -> B (H W) C")
+        return rearrange(embed, "B C H W -> B (H W) C").to(img)
         
         img = comfy.ldm.common_dit.pad_to_patch_size(img, (self.patch_size, self.patch_size))
         
@@ -512,7 +511,7 @@ class Retrojector:
     def unembed(self, img_embed: torch.Tensor):
         
         img_embed = rearrange(img_embed, "B (H W) C -> B C H W", H=self.h, W=self.w)
-        return self.invert_unshuffle_conv(self.unshuffle, self.embedder[1], img_embed, self.orig_shape)
+        return self.invert_unshuffle_conv(self.unshuffle, self.embedder[1], img_embed, self.orig_shape).to(img_embed)
         
         if   self.CONV2D:
             #img_embed = rearrange(img_embed, "b (h w) (c ph pw) -> b c (h ph) (w pw)", h=self.h, w=self.w, ph=self.patch_size, pw=self.patch_size)
@@ -2115,6 +2114,8 @@ class Style_Model(Stylizer):
                     print("Style guide nonetype set for Kontext.")
                 else:
                     self.guides = torch.cat(self.guides, dim=0)
+            if hasattr(self, "latent_effnet"):
+                self.latent_effnet = model.inner_model.inner_model.process_latent_in(self.latent_effnet['samples']).to(dtype=self.dtype, device=self.device)
             self.GUIDES_INITIALIZED = True
     
     def set_conditioning(self, positive, negative):
@@ -2290,6 +2291,11 @@ class StyleCascadeC_BaseBlock(Stylizer):
         self.res      = [0.0]
         self.timestep = [0.0]
         self.attn     = [0.0]
+        
+        self.agg      = [0.0]
+        self.agg_res  = [0.0]
+        
+        self.rescaler = [0.0]
         
         self.mask      = [None]
         self.attn_mask = [None]

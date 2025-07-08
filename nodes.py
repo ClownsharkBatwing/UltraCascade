@@ -582,7 +582,7 @@ CASCADE_BLOCK_TYPES = [
 
 
 
-class ClownStyle_CascadeC:
+class ClownStyle_Cascade:
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -675,7 +675,7 @@ class ClownStyle_CascadeC:
         return (guides, )
 
 
-class ClownStyle_Block_CascadeC:
+class ClownStyle_Block_Cascade:
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -690,6 +690,11 @@ class ClownStyle_Block_CascadeC:
                     "res": ("FLOAT",  {"default": 0.0, "min": -100.0, "max": 100.0, "step":0.01, "round": False, "tooltip": "Strength of effect on layer; skips extra calculation if set to 0.0. Skips interpolation if set to 1.0."}),
                     "timestep":      ("FLOAT",  {"default": 0.0, "min": -100.0, "max": 100.0, "step":0.01, "round": False, "tooltip": "Strength of effect on layer; skips extra calculation if set to 0.0. Skips interpolation if set to 1.0."}),
                     "attn":  ("FLOAT",  {"default": 0.0, "min": -100.0, "max": 100.0, "step":0.01, "round": False, "tooltip": "Strength of effect on layer; skips extra calculation if set to 0.0. Skips interpolation if set to 1.0."}),
+
+                    "agg":  ("FLOAT",  {"default": 0.0, "min": -100.0, "max": 100.0, "step":0.01, "round": False, "tooltip": "Strength of effect on layer; skips extra calculation if set to 0.0. Skips interpolation if set to 1.0."}),
+                    "agg_res":  ("FLOAT",  {"default": 0.0, "min": -100.0, "max": 100.0, "step":0.01, "round": False, "tooltip": "Strength of effect on layer; skips extra calculation if set to 0.0. Skips interpolation if set to 1.0."}),
+
+                    "rescaler":  ("FLOAT",  {"default": 0.0, "min": -100.0, "max": 100.0, "step":0.01, "round": False, "tooltip": "Strength of effect on layer; skips extra calculation if set to 0.0. Skips interpolation if set to 1.0."}),
 
                     "tile_h":        ("INT",    {"default": 128, "min": 16, "max": 10000, "step": 16, "tooltip": "Tile size for tiled modes. Lower values will transfer composition more effectively. Dimensions of image must be divisible by this value."}),
                     "tile_w":        ("INT",    {"default": 128, "min": 16, "max": 10000, "step": 16, "tooltip": "Tile size for tiled modes. Lower values will transfer composition more effectively. Dimensions of image must be divisible by this value."}),
@@ -719,6 +724,11 @@ class ClownStyle_Block_CascadeC:
             res      = 0.0,
             timestep = 0.0,
             attn     = 0.0,
+            
+            agg      = 0.0,
+            agg_res  = 0.0,
+            
+            rescaler = 0.0,
 
             tile_h      = 128,
             tile_w      = 128,
@@ -772,6 +782,9 @@ class ClownStyle_Block_CascadeC:
             "res":      res,
             "timestep": timestep,
             "attn":     attn,
+            "agg":      agg,
+            "agg_res":  agg_res,
+            "rescaler": rescaler,
 
             "h_tile"       : tile_h // 16,
             "w_tile"       : tile_w // 16,
@@ -810,14 +823,14 @@ class ClownStyle_Block_CascadeC:
 
 
 
-class ClownStyle_Attn_CascadeC:
+class ClownStyle_Attn_Cascade:
 
     @classmethod
     def INPUT_TYPES(cls):
         return {"required":
                     {
                     "mode":          (STYLE_MODES, {"default": "scattersort"},),
-                    "apply_to":      (["self","self,cross","cross"], {"default": "self"},),
+                    #"apply_to":      (["self","self,cross","cross"], {"default": "self"},),
                     "block_type":    (CASCADE_BLOCK_TYPES, {"default": "input"},),
                     "block_list":    ("STRING", {"default": "all", "multiline": True}),
                     "block_weights": ("STRING", {"default": "1.0", "multiline": True}),
@@ -970,8 +983,44 @@ class ClownStyle_Attn_CascadeC:
 
 
 
+class ClownStyle_Effnet_Cascade:
 
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required":
+                    {
+                    "effnet": ("LATENT", ),
+                    },
+                "optional": 
+                    {
+                    "blocks": ("BLOCKS", ),
+                    }  
+                }
     
+    RETURN_TYPES = ("BLOCKS",)
+    RETURN_NAMES = ("blocks",)
+    FUNCTION     = "main"
+    CATEGORY     = "RES4LYF/sampler_extensions"
+
+    def main(self,
+            effnet = None,
+            blocks = None,
+            ):
+        
+        blocks = copy.deepcopy(blocks) if blocks is not None else {}
+        
+        StyleMMDiT = blocks.get('StyleMMDiT')
+        if StyleMMDiT is None:
+            StyleMMDiT = StyleCascadeC_Model()
+            
+        StyleMMDiT.latent_effnet = effnet
+        
+        blocks['StyleMMDiT'] = StyleMMDiT
+
+        return (blocks, )
+
+
+
 
 NODE_CLASS_MAPPINGS = {
     "UltraCascade_Loader"                       : UltraCascade_Loader,
@@ -988,10 +1037,10 @@ NODE_CLASS_MAPPINGS = {
     "UltraCascade_StageC_VAEEncode_Exact"       : UltraCascade_StageC_VAEEncode_Exact,
     "UltraCascade_StageC_VAEEncode_Exact_Tiled" : UltraCascade_StageC_VAEEncode_Exact_Tiled,
 
-    "ClownStyle_Block_CascadeC"                 : ClownStyle_Block_CascadeC,
-    "ClownStyle_Attn_CascadeC"                  : ClownStyle_Attn_CascadeC,
-    "ClownStyle_CascadeC"                       : ClownStyle_CascadeC,
-
+    "ClownStyle_Block_Cascade"                  : ClownStyle_Block_Cascade,
+    "ClownStyle_Attn_Cascade"                   : ClownStyle_Attn_Cascade,
+    "ClownStyle_Cascade"                        : ClownStyle_Cascade,
+    "ClownStyle_Effnet_Cascade"                 : ClownStyle_Effnet_Cascade,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -1008,7 +1057,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "UltraCascade_StageC_Tile"                  : "UltraCascade Stage C Tile",
     "UltraCascade_StageC_VAEEncode_Exact"       : "UltraCascade StageC VAE Encode Exact",
     "UltraCascade_StageC_VAEEncode_Exact Tiled" : "UltraCascade StageC VAE Encode Exact Tiled",
-
 }
 
 

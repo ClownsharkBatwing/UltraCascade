@@ -5,6 +5,10 @@ from .modules.stage_up import StageUP
 import types
 import torch
 
+from .style_transfer import Retrojector
+from .modules.common_std import ReAttnBlock, ReAttention2D, ReOptimizedAttention
+from comfy.ldm.cascade.common import AttnBlock, ResBlock, TimestepBlock
+
 class UltraCascade_StageB_Patcher:
     @classmethod
     def INPUT_TYPES(s):
@@ -28,6 +32,24 @@ class UltraCascade_StageB_Patcher:
         model.model.diffusion_model.style_dtype = torch.float64 #getattr(torch, style_dtype) if style_dtype != "default" else None
         model.model.diffusion_model.proj_weights = None
         model.model.diffusion_model.y0_adain_embed = None
+        
+        m = model.model.diffusion_model
+
+        m.Retrojector = Retrojector(m.embedding[1], pinv_dtype=torch.float64, dtype=torch.float64)
+        
+        for down_block_stage in m.down_blocks:
+            for down_block in down_block_stage:
+                if isinstance(down_block, AttnBlock):
+                    down_block.__class__ = ReAttnBlock
+                    down_block.attention.__class__ = ReAttention2D
+                    down_block.attention.attn.__class__ = ReOptimizedAttention
+                    
+        for up_block_stage in m.up_blocks:
+            for up_block in up_block_stage:
+                if isinstance(up_block, AttnBlock):
+                    up_block.__class__ = ReAttnBlock
+                    up_block.attention.__class__ = ReAttention2D
+                    up_block.attention.attn.__class__ = ReOptimizedAttention
 
         return (model,)
     

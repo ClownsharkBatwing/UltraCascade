@@ -90,12 +90,12 @@ class TransInr(nn.Module):
     def __init__(self, ind=2048, ch=1024, n_head=32, n_groups=64, f_dim=1024, time_dim=2048, t_conds=[]): # head_dim=64 if f_dim=768 and n_head=12, 32 if 768 and 32
         super().__init__()
         
-        self.input_layer = nn.Conv2d(ind, ch, 1)
-        self.tokenizer = ImgrecTokenizer(dim=ch, img_channels=ch)
+        self.input_layer         = nn.Conv2d(ind, ch, 1)
+        self.tokenizer           = ImgrecTokenizer(dim=ch, img_channels=ch)
 
-        self.hyponet = HypoMlp(depth=2, in_dim=2, out_dim=ch, hidden_dim=f_dim, use_pe=True, pe_dim=128)
+        self.hyponet             = HypoMlp(depth=2, in_dim=2, out_dim=ch, hidden_dim=f_dim, use_pe=True, pe_dim=128)
         self.transformer_encoder = TransformerEncoder(dim=f_dim, depth=1, n_head=n_head, head_dim=f_dim // n_head, ff_dim=f_dim)
-        self.base_params = nn.ParameterDict()
+        self.base_params         = nn.ParameterDict()
         
         n_wtokens = 0
         self.wtoken_postfc = nn.ModuleDict()
@@ -114,10 +114,10 @@ class TransInr(nn.Module):
             self.wtoken_rng[name] = (n_wtokens, n_wtokens + g)
             n_wtokens += g
             
-        self.wtokens = nn.Parameter(torch.randn(n_wtokens, f_dim))
-        self.output_layer = nn.Conv2d(ch, ind, 1)
-        self.mapp_t = TimestepBlock(ind, time_dim, conds=t_conds)
-        self.hr_norm = ScaleNormalize_res(ind, 64, conds=[])
+        self.wtokens         = nn.Parameter(torch.randn(n_wtokens, f_dim))
+        self.output_layer    = nn.Conv2d(ch, ind, 1)
+        self.mapp_t          = TimestepBlock(ind, time_dim, conds=t_conds)
+        self.hr_norm         = ScaleNormalize_res(ind, 64, conds =[])
         self.normalize_final = LayerNorm2d(ind, elementwise_affine=False, eps=1e-6)
 
         self.toout = nn.Sequential(

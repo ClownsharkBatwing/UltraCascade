@@ -15,6 +15,8 @@ from ..style_transfer import apply_scattersort_masked, apply_scattersort_tiled, 
 
 from ..modules.common_std import ReAttnBlock, ReAttention2D, ReOptimizedAttention
 
+K_OFFSET = {2}
+
 class StageUP(StageC):
     def __init__(self, c_in=16, c_out=16, c_r=64, patch_size=1, c_cond=2048, c_hidden=[2048, 2048], nhead=[32, 32],
                 blocks=[[8, 24], [24, 8]], block_repeat=[[1, 1], [1, 1]], level_config=['CTA', 'CTA'],
@@ -88,11 +90,11 @@ class StageUP(StageC):
             self.agg_net_up.append(TransInr(time_dim=self.c_r)) 
 
         for i in range(len(self.c_hidden)):
-            up_blocks = nn.ModuleList()
+            down_blocks = nn.ModuleList()
             for j in range(self.blocks[0][i]):
                 if j % 4 == 0:
-                    up_blocks.append(ScaleNormalize_res(self.c_hidden[0], self.c_r, conds=[]))
-            self.norm_down_blocks.append(up_blocks)
+                    down_blocks.append(ScaleNormalize_res(self.c_hidden[0], self.c_r, conds=[]))
+            self.norm_down_blocks.append(down_blocks)
 
         for i in reversed(range(len(self.c_hidden))):
             up_block = nn.ModuleList()
@@ -111,8 +113,10 @@ class StageUP(StageC):
         level_outputs = []
         block_group = zip(self.down_blocks, self.down_downscalers, self.down_repeat_mappers, style_blocks)
         
+        agg_iter = 0
         for stage_cnt, (down_block, downscaler, repmap, style_block) in enumerate(block_group):
             x = downscaler(x)
+            x = style_block(x, "rescaler")
             for i in range(len(repmap) + 1):
                 for inner_cnt, block in enumerate(down_block):
 
@@ -126,17 +130,28 @@ class StageUP(StageC):
                         
                     elif isinstance(block, ReAttnBlock) or (hasattr(block, "_fsdp_wrapped_module") and isinstance(block._fsdp_wrapped_module, AttnBlock)):
                         x = block(x, clip, style_block.attn_block)
-                        if require_q and (inner_cnt == 2):
+                        if require_q and (inner_cnt in K_OFFSET):
                             qs.append(x.clone())
-                        if lr_guide is not None and (inner_cnt == 2):
+                        if lr_guide is not None and (inner_cnt in K_OFFSET):
+                            #guide = self.agg_net[stage_cnt](x.shape, x.to(lr_guide[agg_iter]), lr_guide[agg_iter], r_emb_lite.to(lr_guide[agg_iter])).to(x)
+                            #guide = style_block(guide, "agg")
+                            #x = x + guide.to(x)
+                            #x = style_block(x, "agg_res")
+                            #agg_iter += 1
+
                             guide = self.agg_net[stage_cnt](x.shape, x.to(lr_guide[stage_cnt]), lr_guide[stage_cnt], r_emb_lite.to(lr_guide[stage_cnt])).to(x)
-                            
+                            guide = style_block(guide, "agg")
+
                             guide_flat = torch.zeros_like(x)
                             for i2 in range(0, len(guide)): 
                                 guide_flat = guide_flat + guide[i2].unsqueeze(0)
                             guide_flat = guide_flat / len(guide)
                             
                             x = x + guide_flat.to(dtype=x.dtype)
+                            x = style_block(x, "agg_res")
+                            
+
+
                         x = style_block(x, "attn")
 
                     elif isinstance(block, TimestepBlock) or (hasattr(block, "_fsdp_wrapped_module") and isinstance(block._fsdp_wrapped_module, TimestepBlock)):
@@ -216,7 +231,7 @@ class StageUP(StageC):
         
         if require_ff:
             agg_feas = []
-            
+        agg_iter = 0
         x = level_outputs[0]
         block_group = zip(self.up_blocks, self.up_upscalers, self.up_repeat_mappers, style_blocks)
         for i, (up_block, upscaler, repmap, style_block) in enumerate(block_group):
@@ -238,13 +253,13 @@ class StageUP(StageC):
                         
                     elif isinstance(block, ReAttnBlock) or (hasattr(block, "_fsdp_wrapped_module") and isinstance(block._fsdp_wrapped_module, AttnBlock)):
                         #x = block(x, clip)
-                        if i == 0 and j == 0 and k == 2 and sag_func is not None: 
+                        if i == 0 and j == 0 and k in K_OFFSET and sag_func is not None: 
                             x = self.sag_attn_proc(x, clip, block, sag_func)
 
-                        elif i == 0 and j ==0 and k == 2 and pag_patch_flag == "rag" and sag_func == None:
+                        elif i == 0 and j ==0 and k in K_OFFSET and pag_patch_flag == "rag" and sag_func == None:
                             x = self.rag_attn_proc(x, clip, block)
                             
-                        elif i == 0 and j ==0 and k == 2 and pag_patch_flag == "pag" and sag_func == None:
+                        elif i == 0 and j ==0 and k in K_OFFSET and pag_patch_flag == "pag" and sag_func == None:
                             x = self.pag_attn_proc(x, clip, block)
 
                         else:
@@ -252,11 +267,18 @@ class StageUP(StageC):
                         
                         x = style_block(x, "attn")
                             
-                        if require_ff and (k == 2):
+                        if require_ff and (k in K_OFFSET):
                             agg_feas.append(x.clone())
-                        if agg_f is not None and (k == 2):
+                        if agg_f is not None and (k in K_OFFSET):
+                            #guide = self.agg_net_up[i](x.shape, x.to(agg_f[agg_iter]), agg_f[agg_iter], r_emb_lite.to(agg_f[agg_iter])) .to(x)
+                            #guide = style_block(guide, "agg")
+                            #x = x + guide.to(dtype=x.dtype)
+                            #x = style_block(x, "agg_res")
+                            #agg_iter += 1
+                                                        
                             guide = self.agg_net_up[i](x.shape, x.to(agg_f[i]), agg_f[i], r_emb_lite.to(agg_f[i])) .to(x)
-                            
+                            guide = style_block(guide, "agg")
+
                             guide_flat = torch.zeros_like(x)
                             for i2 in range(0, len(guide)): 
                                 guide_flat = guide_flat + guide[i2].unsqueeze(0)
@@ -265,7 +287,10 @@ class StageUP(StageC):
                             if self.guide_mode_weighted is True:
                                 x = (1 - guide_weight) * x + guide_weight * guide_flat.to(dtype=x.dtype)
                             else:
-                                x = x + guide_weight * guide_flat.to(dtype=x.dtype)
+                                #x = x + guide_weight * guide_flat.to(dtype=x.dtype)
+                                x = x + guide_flat.to(dtype=x.dtype)
+                                
+
 
                     elif isinstance(block, TimestepBlock) or (hasattr(block, "_fsdp_wrapped_module") and isinstance(block._fsdp_wrapped_module, TimestepBlock)):
                         x = block(x, r_embed)
@@ -277,6 +302,7 @@ class StageUP(StageC):
                 if j < len(repmap):
                     x = repmap[j](x)
             x = upscaler(x)
+            x = style_block(x, "rescaler")
 
         if require_ff:
             return x, agg_feas
@@ -333,9 +359,10 @@ class StageUP(StageC):
         transformer_options['StyleMMDiT'] = None
 
         StyleMMDiT.Retrojector.unshuffle = self.embedding[0]
-        StyleMMDiT.Retrojector.embedder = copy.deepcopy(self.embedding)#.to(torch.bfloat16)
-        StyleMMDiT.Retrojector.embedder[1].weight.data = StyleMMDiT.Retrojector.embedder[1].weight.data.cuda()
-        StyleMMDiT.Retrojector.embedder[1].bias.data = StyleMMDiT.Retrojector.embedder[1].bias.data.cuda()
+        StyleMMDiT.Retrojector.embedder = copy.deepcopy(self.embedding).to(torch.float64).cuda()
+        #StyleMMDiT.Retrojector.embedder = copy.deepcopy(self.embedding)#.to(torch.bfloat16)
+        #StyleMMDiT.Retrojector.embedder[1].weight.data = StyleMMDiT.Retrojector.embedder[1].weight.data.cuda()
+        #StyleMMDiT.Retrojector.embedder[1].bias.data = StyleMMDiT.Retrojector.embedder[1].bias.data.cuda()
 
         x_orig = x.clone()
         
@@ -443,6 +470,7 @@ class StageUP(StageC):
                     h = torch.cat([h, y0_style_noised[cond_iter:cond_iter+1]], dim=0).to(h)"""
                     
                 x = self.embedding(x)
+                StyleMMDiT(x, "proj_in")
         
                 r_embed = self.gen_r_embedding(r).to(dtype=x.dtype)
                 for c in self.t_conds:
@@ -451,8 +479,8 @@ class StageUP(StageC):
                 clip = self.gen_c_embeddings(clip_text, clip_text_pooled, clip_img)
         
 
-
-                with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+                #with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+                with torch.amp.autocast(dtype=torch.bfloat16, device_type='cuda'):
                     if self.x_lr is not None and self.lr_guide is None: # x_lr is set, but lr_guide is missing: run one step to generate lr_guide
                         self.guide_weights_tmp = self.guide_weights
                         x_lr = self.x_lr.to(dtype=x.dtype, device=x.device)
@@ -473,7 +501,7 @@ class StageUP(StageC):
                             self.guide_weights_tmp = self.guide_weights_tmp[1:]
                     else: 
                         guide_weight = r[0].item()
-                
+                    #print("guide_weight:", guide_weight, flush=True)
                     pag_patch_flag=""
                     if 'patches_replace' in kwargs['transformer_options']:
                         if "attn1" in kwargs['transformer_options']['patches_replace']:
@@ -500,6 +528,8 @@ class StageUP(StageC):
                     self.sigmas_prev = sigmas
                     
                     eps = self.clf(x)
+                    
+                    eps = StyleMMDiT(eps, "proj_out")
 
                     out_list.append(eps[0:1])
                     

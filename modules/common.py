@@ -30,6 +30,8 @@ class TimestepBlock(nn.Module):
             setattr(self, f"mapper_{cname}", Linear(c_timestep, c * 2))
 
     def forward(self, x, t):
+        x = x.to(self.mapper.weight.dtype)
+        t = t.to(self.mapper.weight.dtype)
         t = t.chunk(len(self.conds) + 1, dim=1)
         a, b = self.mapper(t[0])[:, :, None, None].chunk(2, dim=1)
         for i, c in enumerate(self.conds):

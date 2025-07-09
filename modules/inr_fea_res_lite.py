@@ -12,7 +12,7 @@ from einops import rearrange
 
 def batched_linear_mm(x, wb):
     # x: (B, N, D1); wb: (B, D1 + 1, D2) or (D1 + 1, D2)
-    one = torch.ones(*x.shape[:-1], 1, device=x.device)
+    one = torch.ones(*x.shape[:-1], 1, device=x.device, dtype=x.dtype)
     return torch.matmul(torch.cat([x, one], dim=-1), wb)
 
 def make_coord_grid(shape, range, device=None):
@@ -78,7 +78,7 @@ class HypoMlp(nn.Module):
         if self.use_pe:
             x = self.convert_posenc(x)
         for i in range(self.depth):
-            x = batched_linear_mm(x, self.params[f"wb{i}"])
+            x = batched_linear_mm(x.to(self.params[f"wb{i}"].dtype), self.params[f"wb{i}"])
             if i < self.depth - 1:
                 x = self.relu(x)
             else:
@@ -167,13 +167,13 @@ class TransInr(nn.Module):
         coord = einops.repeat(coord, "h w d -> b h w d", b=dtokens.shape[0])
         self.hyponet.set_params(params)
         ori_up = F.interpolate(original.float(), target_shape[2:])
-        hr_rec = (self.output_layer(rearrange(self.hyponet(coord), "b h w c -> b c h w")) + ori_up)
+        hr_rec = (self.output_layer(rearrange(self.hyponet(coord), "b h w c -> b c h w").to(self.output_layer.weight.dtype)) + ori_up)
 
         #output = self.toout(torch.cat((hr_rec, target), dim=1).permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
         if target.shape[0] == 1:
             target = target.repeat(hr_rec.shape[0],1,1,1)
         #target = target.repeat(2 // hr_rec.shape[0],1,1,1)
-        output = self.toout(torch.cat((hr_rec, target), dim=1).permute(0, 2, 3, 1)).permute(0, 3, 1, 2) #changed this line to accomodate multiple clip_img
+        output = self.toout(torch.cat((hr_rec, target), dim=1).permute(0, 2, 3, 1).to(self.toout[0].weight.dtype)).permute(0, 3, 1, 2) #changed this line to accomodate multiple clip_img
         
         output = self.mapp_t(output, t_emb)
         output = self.normalize_final(output)

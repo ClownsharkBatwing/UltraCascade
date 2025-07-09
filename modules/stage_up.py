@@ -13,7 +13,7 @@ from comfy.ldm.cascade.stage_c import StageC
 from ..latents import tile_latent, untile_latent, gaussian_blur_2d, median_blur_2d
 from ..style_transfer import apply_scattersort_masked, apply_scattersort_tiled, adain_seq_inplace, adain_patchwise_row_batch_med, adain_patchwise_row_batch, StyleCascadeC_Model, Retrojector
 
-from ..modules.common_std import ReAttnBlock, ReAttention2D, ReOptimizedAttention
+from ..modules.common_std import ReAttnBlock, ReAttention2D, ReOptimizedAttention, ReAttnBlock_fp32, ReAttention2D_fp32, ReOptimizedAttention_fp32, ReTimestepBlock_fp32
 
 K_OFFSET = {2}
 
@@ -103,19 +103,29 @@ class StageUP(StageC):
                     up_block.append(ScaleNormalize_res(self.c_hidden[0], self.c_r, conds=[]))
             self.norm_up_blocks.append(up_block)
 
+    def gen_c_embeddings(self, clip_txt, clip_txt_pooled, clip_img):
+        clip_txt = self.clip_txt_mapper(clip_txt.to(self.clip_txt_mapper.weight.data))
+        if len(clip_txt_pooled.shape) == 2:
+            clip_txt_pooled = clip_txt_pooled.unsqueeze(1)
+        if len(clip_img.shape) == 2:
+            clip_img = clip_img.unsqueeze(1)
+        clip_txt_pool = self.clip_txt_pooled_mapper(clip_txt_pooled.to(self.clip_txt_pooled_mapper.weight.data)).view(clip_txt_pooled.size(0), clip_txt_pooled.size(1) * self.c_clip_seq, -1)
+        clip_img = self.clip_img_mapper(clip_img.to(self.clip_img_mapper.weight.data)).view(clip_img.size(0), clip_img.size(1) * self.c_clip_seq, -1)
+        clip = torch.cat([clip_txt, clip_txt_pool, clip_img], dim=1)
+        clip = self.clip_norm(clip)
+        return clip
 
-
-    def _down_encode(self, x, r_embed, clip, cnet=None, require_q=False, lr_guide=None, r_emb_lite=None, guide_weight=1.0, pag_patch_flag=False, style_blocks=None):
+    def _down_encode(self, x, r_embed, clip, cnet=None, require_q=False, lr_guide=None, r_emb_lite=None, guide_weight=1.0, pag_patch_flag=False, style_blocks=None, attn_mask=None):
     
         if require_q:
             qs = []
-        
+        downscaler_dtype = self.down_downscalers[1][1].blocks[0].weight.data.dtype
         level_outputs = []
         block_group = zip(self.down_blocks, self.down_downscalers, self.down_repeat_mappers, style_blocks)
         
         agg_iter = 0
         for stage_cnt, (down_block, downscaler, repmap, style_block) in enumerate(block_group):
-            x = downscaler(x)
+            x = downscaler(x.to(downscaler_dtype))
             x = style_block(x, "rescaler")
             for i in range(len(repmap) + 1):
                 for inner_cnt, block in enumerate(down_block):
@@ -125,11 +135,12 @@ class StageUP(StageC):
                             next_cnet = cnet.pop()
                             if next_cnet is not None:
                                 x = x + F.interpolate(next_cnet, size=x.shape[-2:], mode="bilinear", align_corners=True).to(dtype=x.dtype)
+                        #x = block(x.to(torch.bfloat16))
                         x = block(x)
                         x = style_block(x, "res")
                         
-                    elif isinstance(block, ReAttnBlock) or (hasattr(block, "_fsdp_wrapped_module") and isinstance(block._fsdp_wrapped_module, AttnBlock)):
-                        x = block(x, clip, style_block.attn_block)
+                    elif isinstance(block, (AttnBlock, ReAttnBlock, ReAttnBlock_fp32)) or (hasattr(block, "_fsdp_wrapped_module") and isinstance(block._fsdp_wrapped_module, (AttnBlock, ReAttnBlock, ReAttnBlock_fp32))):
+                        x = block(x, clip, style_block.attn_block, attn_mask)
                         if require_q and (inner_cnt in K_OFFSET):
                             qs.append(x.clone())
                         if lr_guide is not None and (inner_cnt in K_OFFSET):
@@ -154,7 +165,7 @@ class StageUP(StageC):
 
                         x = style_block(x, "attn")
 
-                    elif isinstance(block, TimestepBlock) or (hasattr(block, "_fsdp_wrapped_module") and isinstance(block._fsdp_wrapped_module, TimestepBlock)):
+                    elif isinstance(block, (TimestepBlock,ReTimestepBlock_fp32)) or (hasattr(block, "_fsdp_wrapped_module") and isinstance(block._fsdp_wrapped_module, (TimestepBlock,ReTimestepBlock_fp32))):
                         x = block(x, r_embed)
                         x = style_block(x, "timestep")
                     else:
@@ -227,11 +238,12 @@ class StageUP(StageC):
         
         return x
 
-    def _up_decode(self, level_outputs, r_embed, clip, cnet=None, require_ff=False, agg_f=None, r_emb_lite=None, guide_weight=1.0, pag_patch_flag=False, sag_func=None, style_blocks=None): 
+    def _up_decode(self, level_outputs, r_embed, clip, cnet=None, require_ff=False, agg_f=None, r_emb_lite=None, guide_weight=1.0, pag_patch_flag=False, sag_func=None, style_blocks=None, attn_mask=None): 
         
         if require_ff:
             agg_feas = []
         agg_iter = 0
+        upscaler_dtype = self.up_upscalers[0][1].blocks[1].weight.data.dtype
         x = level_outputs[0]
         block_group = zip(self.up_blocks, self.up_upscalers, self.up_repeat_mappers, style_blocks)
         for i, (up_block, upscaler, repmap, style_block) in enumerate(block_group):
@@ -239,6 +251,7 @@ class StageUP(StageC):
                 for k, block in enumerate(up_block):
 
                     if isinstance(block, ResBlock) or (hasattr(block, "_fsdp_wrapped_module") and isinstance(block._fsdp_wrapped_module, ResBlock)):
+                        #skip = level_outputs[i].to(torch.bfloat16) if k == 0 and i > 0 else None
                         skip = level_outputs[i] if k == 0 and i > 0 else None
                         if skip is not None and (x.size(-1) != skip.size(-1) or x.size(-2) != skip.size(-2)):
                             x = F.interpolate(x, skip.shape[-2:],
@@ -248,10 +261,11 @@ class StageUP(StageC):
                             next_cnet = cnet.pop()
                             if next_cnet is not None:
                                 x = x + F.interpolate(next_cnet, size=x.shape[-2:], mode="bilinear",align_corners=True).to(dtype=x.dtype)
+                        #x = block(x.to(torch.bfloat16), skip)
                         x = block(x, skip)
                         x = style_block(x, "res")
                         
-                    elif isinstance(block, ReAttnBlock) or (hasattr(block, "_fsdp_wrapped_module") and isinstance(block._fsdp_wrapped_module, AttnBlock)):
+                    elif isinstance(block, (AttnBlock, ReAttnBlock, ReAttnBlock_fp32)) or (hasattr(block, "_fsdp_wrapped_module") and isinstance(block._fsdp_wrapped_module, (AttnBlock, ReAttnBlock, ReAttnBlock_fp32))):
                         #x = block(x, clip)
                         if i == 0 and j == 0 and k in K_OFFSET and sag_func is not None: 
                             x = self.sag_attn_proc(x, clip, block, sag_func)
@@ -263,7 +277,7 @@ class StageUP(StageC):
                             x = self.pag_attn_proc(x, clip, block)
 
                         else:
-                            x = block(x, clip, style_block.attn_block) #self.heads = 32 in common.py OptimizedAttention()
+                            x = block(x, clip, style_block.attn_block, attn_mask) #self.heads = 32 in common.py OptimizedAttention()
                         
                         x = style_block(x, "attn")
                             
@@ -275,7 +289,7 @@ class StageUP(StageC):
                             #x = x + guide.to(dtype=x.dtype)
                             #x = style_block(x, "agg_res")
                             #agg_iter += 1
-                                                        
+                            
                             guide = self.agg_net_up[i](x.shape, x.to(agg_f[i]), agg_f[i], r_emb_lite.to(agg_f[i])) .to(x)
                             guide = style_block(guide, "agg")
 
@@ -292,7 +306,7 @@ class StageUP(StageC):
                                 
 
 
-                    elif isinstance(block, TimestepBlock) or (hasattr(block, "_fsdp_wrapped_module") and isinstance(block._fsdp_wrapped_module, TimestepBlock)):
+                    elif isinstance(block, (TimestepBlock,ReTimestepBlock_fp32)) or (hasattr(block, "_fsdp_wrapped_module") and isinstance(block._fsdp_wrapped_module, (TimestepBlock,ReTimestepBlock_fp32))):
                         x = block(x, r_embed)
                         x = style_block(x, "timestep")
                         
@@ -301,7 +315,7 @@ class StageUP(StageC):
                         
                 if j < len(repmap):
                     x = repmap[j](x)
-            x = upscaler(x)
+            x = upscaler(x.to(upscaler_dtype))
             x = style_block(x, "rescaler")
 
         if require_ff:
@@ -400,7 +414,8 @@ class StageUP(StageC):
         elif 'x_init' in transformer_options:
             x_init = transformer_options.get('x_init').to(x)
         
-        
+        weight    = -1 * transformer_options.get("regional_conditioning_weight", 0.0)
+        floor     = -1 * transformer_options.get("regional_conditioning_floor",  0.0)
         
         
         x_orig, r_orig, clip_text_orig, clip_text_pooled_orig, clip_img_orig = clone_inputs(x, r, clip_text, clip_text_pooled, clip_img)
@@ -452,10 +467,42 @@ class StageUP(StageC):
                 x, r, clip_text, clip_text_pooled, clip_img = clone_inputs(x_orig[cond_iter].unsqueeze(0), r_orig[cond_iter].unsqueeze(0), clip_text_orig[cond_iter].unsqueeze(0), clip_text_pooled_orig[cond_iter].unsqueeze(0), clip_img_orig[cond_iter].unsqueeze(0))
                 x = new_x[cond_iter].unsqueeze(0).to(x) if new_x is not None else x
         
+                mask, mask_down = None, None
+                if not UNCOND and 'AttnMask' in transformer_options: # and weight != 0:
+                    AttnMask = transformer_options['AttnMask']
+                    mask = transformer_options['AttnMask'].attn_mask.mask.to('cuda')
+                    if weight == 0:
+                        mask, mask_down = None, None
+                    clip_text = transformer_options['RegContext'].context.to(clip_text.dtype).to(clip_text.device)
+                    
+                    clip = self.gen_c_embeddings(clip_text.view(2,-1,1280), clip_text_pooled.repeat(2,1,1), clip_img.repeat(2,1,1))
+                    clip = clip.view(1,-1, 2048)
+                    clip_list = []
+                    for i, (clip_text, clip_text_pooled) in enumerate(zip(transformer_options['RegContext'].context_list, transformer_options['RegContext'].clip_pooled_list)):
+                        clip_img_tmp = transformer_options['RegContext'].clip_fea_list[i] if i < len(transformer_options['RegContext'].clip_fea_list) else clip_img
+                        clip = self.gen_c_embeddings(clip_text, clip_text_pooled, clip_img_tmp)
+                        clip_list.append(clip)
+                    clip = torch.cat(clip_list, dim=-2)
+        
+                elif UNCOND and 'AttnMask' in transformer_options:
+                    AttnMask = transformer_options['AttnMask']
+                    mask = transformer_options['AttnMask'].attn_mask.mask.to('cuda')
+                    #mask_down = transformer_options['AttnMask'].mask_down.to('cuda')
+                    A       = clip_text
+                    B       = transformer_options['RegContext'].context
+                    clip_text = A.repeat(1,    (B.shape[1] // A.shape[1]) + 1, 1)[:,   :B.shape[1], :]
+                    
+                    clip = self.gen_c_embeddings(clip_text.view(2,-1,1280), clip_text_pooled.repeat(2,1,1), clip_img.repeat(2,1,1))
+                    clip = clip.view(1,-1, 2048)
+        
+                if not 'AttnMask' in transformer_options:
+                    clip = self.gen_c_embeddings(clip_text, clip_text_pooled, clip_img)
+        
                 if y0_style_active and not RECON_MODE:
-                    clip_text = clip_text[0:1].repeat(bsz,1,1)
-                    clip_text_pooled = clip_text_pooled[0:1].repeat(bsz,1)
-                    clip_img = clip_img[0:1].repeat(bsz,1,1)
+                    #clip_text = clip_text[0:1].repeat(bsz,1,1)
+                    #clip_text_pooled = clip_text_pooled[0:1].repeat(bsz,1)
+                    #clip_img = clip_img[0:1].repeat(bsz,1,1)
+                    clip = clip.repeat(bsz,1,1)
                     x = torch.cat([x, y0_style_noised[cond_iter:cond_iter+1]], dim=0).to(x)
                     """if mask is None:
                         context, y, _ = StyleMMDiT.apply_style_conditioning(
@@ -468,71 +515,76 @@ class StageUP(StageC):
                         context = context.repeat(bsz_style + 1, 1, 1)
                         y = y.repeat(bsz_style + 1, 1)                   if y      is not None else None
                     h = torch.cat([h, y0_style_noised[cond_iter:cond_iter+1]], dim=0).to(h)"""
+                
+                if mask is not None:
+                    mask = torch.cat([mask[:,-mask.shape[-2]:], mask[:,:-mask.shape[-2]]], dim=-1)  # swap cross and self attn components... sd15/sdxl have txt+img, this is kv from img+txt (cat)
                     
-                x = self.embedding(x)
+                x = self.embedding(x.to(self.embedding[1].weight.data.dtype))
                 StyleMMDiT(x, "proj_in")
-        
+
                 r_embed = self.gen_r_embedding(r).to(dtype=x.dtype)
                 for c in self.t_conds:
                     t_cond = kwargs.get(c, torch.zeros_like(r))[cond_iter].unsqueeze(0)
                     r_embed = torch.cat([r_embed, self.gen_r_embedding(t_cond).to(dtype=x.dtype)], dim=1)
-                clip = self.gen_c_embeddings(clip_text, clip_text_pooled, clip_img)
+                
         
 
                 #with torch.cuda.amp.autocast(dtype=torch.bfloat16):
-                with torch.amp.autocast(dtype=torch.bfloat16, device_type='cuda'):
-                    if self.x_lr is not None and self.lr_guide is None: # x_lr is set, but lr_guide is missing: run one step to generate lr_guide
-                        self.guide_weights_tmp = self.guide_weights
-                        x_lr = self.x_lr.to(dtype=x.dtype, device=x.device)
-                        x_lr = self.embedding(x_lr)
-                        level_outputs, lr_enc = self._down_encode(x_lr, r_embed, clip, cnet, require_q=True,
-                                                                lr_guide=None, style_blocks=StyleMMDiT.input_blocks) #lr_guide=lr_guide[0] if lr_guide is not None else None,
-                        
-                        x_out, lr_dec = self._up_decode(level_outputs, r_embed, clip, cnet, require_ff=True, 
-                                                        agg_f=None, style_blocks=StyleMMDiT.output_blocks) #agg_f=lr_guide[1] if lr_guide is not None else None,
-                        
-                        lr_guide = ([f.chunk(2)[0].repeat(2, 1, 1, 1) for f in lr_enc], 
-                                    [f.chunk(2)[0].repeat(2, 1, 1, 1) for f in lr_dec])
-                        self.lr_guide = lr_guide
-                        
-                    if self.guide_weights is not None:
-                        guide_weight = self.guide_weights_tmp[0].item() 
-                        if self.sigmas_prev[0] != sigmas[0] and torch.isin(sigmas[0], self.sigmas_schedule.to(sigmas.device)):
-                            self.guide_weights_tmp = self.guide_weights_tmp[1:]
-                    else: 
-                        guide_weight = r[0].item()
-                    #print("guide_weight:", guide_weight, flush=True)
-                    pag_patch_flag=""
-                    if 'patches_replace' in kwargs['transformer_options']:
-                        if "attn1" in kwargs['transformer_options']['patches_replace']:
-                            pag_patch_flag = "rag"
-                        if "attn1_pag" in kwargs['transformer_options']['patches_replace']:
-                            pag_patch_flag = "pag"
+                #with torch.amp.autocast(dtype=torch.bfloat16, device_type='cuda'):
+                if self.x_lr is not None and self.lr_guide is None: # x_lr is set, but lr_guide is missing: run one step to generate lr_guide
+                    self.guide_weights_tmp = self.guide_weights
+                    x_lr = self.x_lr.to(dtype=x.dtype, device=x.device)
+                    x_lr = self.embedding(x_lr)
+                    level_outputs, lr_enc = self._down_encode(x_lr, r_embed, clip, cnet, require_q=True,
+                                                            lr_guide=None, style_blocks=StyleMMDiT.input_blocks) #lr_guide=lr_guide[0] if lr_guide is not None else None,
+                    
+                    x_out, lr_dec = self._up_decode(level_outputs, r_embed, clip, cnet, require_ff=True, 
+                                                    agg_f=None, style_blocks=StyleMMDiT.output_blocks) #agg_f=lr_guide[1] if lr_guide is not None else None,
+                    
+                    lr_guide = ([f.chunk(2)[0].repeat(2, 1, 1, 1) for f in lr_enc], 
+                                [f.chunk(2)[0].repeat(2, 1, 1, 1) for f in lr_dec])
+                    self.lr_guide = lr_guide
+                    
+                if self.guide_weights is not None:
+                    guide_weight = self.guide_weights_tmp[0].item() 
+                    if self.sigmas_prev[0] != sigmas[0] and torch.isin(sigmas[0], self.sigmas_schedule.to(sigmas.device)):
+                        self.guide_weights_tmp = self.guide_weights_tmp[1:]
+                else: 
+                    guide_weight = r[0].item()
+                #print("guide_weight:", guide_weight, flush=True)
+                pag_patch_flag=""
+                if 'patches_replace' in kwargs['transformer_options']:
+                    if "attn1" in kwargs['transformer_options']['patches_replace']:
+                        pag_patch_flag = "rag"
+                    if "attn1_pag" in kwargs['transformer_options']['patches_replace']:
+                        pag_patch_flag = "pag"
+            
+                #pag_patch_flag = True if 'patches_replace' in kwargs['transformer_options'] else False
+                pag_patch_func = kwargs['transformer_options']['patches_replace'].get("attn1", {}) if 'patches_replace' in kwargs['transformer_options'] else False
+                pag_func = kwargs.get('transformer_options', {}).get('patches_replace', {}).get('attn1', {})
+                #sag_func = kwargs['transformer_options']['patches_replace']['attn1'][('middle',0,0)] if 'patches_replace' in kwargs['transformer_options'] else None
+                sag_func = (kwargs.get('transformer_options', {}).get('patches_replace', {}).get('attn1', {}).get(('middle', 0, 0), None))
                 
-                    #pag_patch_flag = True if 'patches_replace' in kwargs['transformer_options'] else False
-                    pag_patch_func = kwargs['transformer_options']['patches_replace'].get("attn1", {}) if 'patches_replace' in kwargs['transformer_options'] else False
-                    pag_func = kwargs.get('transformer_options', {}).get('patches_replace', {}).get('attn1', {})
-                    #sag_func = kwargs['transformer_options']['patches_replace']['attn1'][('middle',0,0)] if 'patches_replace' in kwargs['transformer_options'] else None
-                    sag_func = (kwargs.get('transformer_options', {}).get('patches_replace', {}).get('attn1', {}).get(('middle', 0, 0), None))
-                    
-                    level_outputs = self._down_encode(x, r_embed, clip, cnet, require_q=require_f, r_emb_lite=self.gen_r_embedding(r),  guide_weight=guide_weight,
-                                                    lr_guide=lr_guide[0] if lr_guide is not None else None,
-                                                    pag_patch_flag=pag_patch_flag,
-                                                    style_blocks=StyleMMDiT.input_blocks)
+                level_outputs = self._down_encode(x, r_embed, clip, cnet, require_q=require_f, r_emb_lite=self.gen_r_embedding(r),  guide_weight=guide_weight,
+                                                lr_guide=lr_guide[0] if lr_guide is not None else None,
+                                                pag_patch_flag=pag_patch_flag,
+                                                style_blocks=StyleMMDiT.input_blocks,
+                                                attn_mask=mask)
 
-                    x = self._up_decode(level_outputs, r_embed, clip, cnet, require_ff=require_f, r_emb_lite=self.gen_r_embedding(r), guide_weight=guide_weight,
-                                        agg_f=lr_guide[1] if lr_guide is not None else None,
-                                        pag_patch_flag=pag_patch_flag, sag_func=sag_func,
-                                        style_blocks=StyleMMDiT.output_blocks)
+                x = self._up_decode(level_outputs, r_embed, clip, cnet, require_ff=require_f, r_emb_lite=self.gen_r_embedding(r), guide_weight=guide_weight,
+                                    agg_f=lr_guide[1] if lr_guide is not None else None,
+                                    pag_patch_flag=pag_patch_flag, sag_func=sag_func,
+                                    style_blocks=StyleMMDiT.output_blocks,
+                                    attn_mask=mask)
 
-                    self.sigmas_prev = sigmas
-                    
-                    eps = self.clf(x)
-                    
-                    eps = StyleMMDiT(eps, "proj_out")
+                self.sigmas_prev = sigmas
+                
+                eps = self.clf(x.to(self.clf[1].weight.data.dtype))
+                
+                eps = StyleMMDiT(eps, "proj_out")
 
-                    out_list.append(eps[0:1])
-                    
+                out_list.append(eps[0:1])
+                
                 eps = torch.stack(out_list, dim=0).squeeze(dim=1)
 
                 if recon_iter == 1:

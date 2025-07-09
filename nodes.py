@@ -11,7 +11,9 @@ import comfy.model_management
 import itertools
 
 from .style_transfer import StyleCascadeC_Model
-
+from .modules.common_std import ReAttnBlock, ReAttnBlock_fp32, ReAttention2D_fp32, ReOptimizedAttention_fp32, ReTimestepBlock_fp32, ReUpDownBlock2d_fp32
+from comfy.ldm.cascade.common import AttnBlock, TimestepBlock
+from comfy.ldm.cascade.stage_c import UpDownBlock2d
 MAX_RESOLUTION=8192
 
 def initialize_or_scale(tensor, value, steps):
@@ -769,6 +771,11 @@ class ClownStyle_Block_Cascade:
         else:
             block_list  = parse_range_string_int(block_list)
             
+            real_block_list = []
+            for n in block_list:
+                real_block_list.extend([n * 3, n * 3 + 1, n * 3 + 2])
+            block_list = real_block_list
+            
             weights_expanded = [0.0] * 100
             for b, w in zip(block_list, block_weights):
                 weights_expanded[b] = w
@@ -791,6 +798,7 @@ class ClownStyle_Block_Cascade:
         }
         
         block_types = block_type.split(",")
+        
         
         for block_type in block_types:
         
@@ -916,6 +924,11 @@ class ClownStyle_Attn_Cascade:
         else:
             block_list  = parse_range_string_int(block_list)
             
+            real_block_list = []
+            for n in block_list:
+                real_block_list.extend([n * 3, n * 3 + 1, n * 3 + 2])
+            block_list = real_block_list
+            
             weights_expanded = [0.0] * 100
             for b, w in zip(block_list, block_weights):
                 weights_expanded[b] = w
@@ -1022,6 +1035,128 @@ class ClownStyle_Effnet_Cascade:
 
 
 
+
+
+
+class LayerPatcher_Cascade:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {
+            "model":       ("MODEL",),
+            "clipmapper":  (s.get_model_patches(),),
+            "embedders":   (s.get_model_patches(),),
+            "resnet":      (s.get_model_patches(),),
+            "timestep":    (s.get_model_patches(),),
+            "attention":   (s.get_model_patches(),),
+            "dtype":       (["bfloat16", "float16", "float32", "float64"],  {"default": "float32"}),
+        }}
+
+    RETURN_TYPES = ("MODEL",)
+    RETURN_NAMES = ("model",)
+    FUNCTION = "main"
+    CATEGORY = "RES4LYF/patchers"
+    
+    @staticmethod
+    def get_model_patches():
+        return [f for f in folder_paths.get_filename_list("diffusion_models") if f.endswith((".safetensors", ".sft"))]
+    
+    def main(self, model, clipmapper, embedders, resnet, timestep, attention, dtype="float32"):
+        
+        dtype = getattr(torch, dtype)
+        
+        clipmapper = comfy.utils.load_torch_file(folder_paths.get_full_path_or_raise("diffusion_models",clipmapper))
+        embedders = comfy.utils.load_torch_file(folder_paths.get_full_path_or_raise("diffusion_models", embedders))
+        resnet    = comfy.utils.load_torch_file(folder_paths.get_full_path_or_raise("diffusion_models", resnet))
+        timestep  = comfy.utils.load_torch_file(folder_paths.get_full_path_or_raise("diffusion_models", timestep))
+        attention = comfy.utils.load_torch_file(folder_paths.get_full_path_or_raise("diffusion_models", attention))
+        
+        m = model.model.diffusion_model
+        
+        if clipmapper:
+            for key, tensor in clipmapper.items():
+                print(f"Patching {key} with shape {tensor.shape}", flush=True)
+                set_nested_attr(model=m, key=key, value=tensor, dtype=dtype)
+        
+        if embedders:
+            for key, tensor in embedders.items():
+                print(f"Patching {key} with shape {tensor.shape}", flush=True)
+                set_nested_attr(model=m, key=key, value=tensor, dtype=dtype)
+                
+            m.down_downscalers[1][1].__class__ = ReUpDownBlock2d_fp32
+            m.up_upscalers[0][1].__class__     = ReUpDownBlock2d_fp32
+        
+        if resnet:
+            for key, tensor in resnet.items():
+                print(f"Patching {key} with shape {tensor.shape}", flush=True)
+                set_nested_attr(model=m, key=key, value=tensor, dtype=dtype)
+        
+        if timestep:
+            for key, tensor in timestep.items():
+                print(f"Patching {key} with shape {tensor.shape}", flush=True)
+                set_nested_attr(model=m, key=key, value=tensor, dtype=dtype)
+                
+            for down_block_stage in m.down_blocks:
+                for down_block in down_block_stage:
+                    if isinstance(down_block, (TimestepBlock)):
+                        down_block.__class__ = ReTimestepBlock_fp32
+                        
+            for up_block_stage in m.up_blocks:
+                for up_block in up_block_stage:
+                    if isinstance(up_block, (TimestepBlock)):
+                        up_block.__class__ = ReTimestepBlock_fp32
+        
+        if attention:
+            for key, tensor in attention.items():
+                print(f"Patching {key} with shape {tensor.shape}", flush=True)
+                set_nested_attr(model=m, key=key, value=tensor, dtype=dtype)
+                
+            for down_block_stage in m.down_blocks:
+                for down_block in down_block_stage:
+                    if isinstance(down_block, (AttnBlock, ReAttnBlock)):
+                        down_block.__class__ = ReAttnBlock_fp32
+                        down_block.attention.__class__ = ReAttention2D_fp32
+                        down_block.attention.attn.__class__ = ReOptimizedAttention_fp32
+                        
+            for up_block_stage in m.up_blocks:
+                for up_block in up_block_stage:
+                    if isinstance(up_block, (AttnBlock, ReAttnBlock)):
+                        up_block.__class__ = ReAttnBlock_fp32
+                        up_block.attention.__class__ = ReAttention2D_fp32
+                        up_block.attention.attn.__class__ = ReOptimizedAttention_fp32
+        
+        return (model,)
+
+def set_nested_attr(model, key, value, dtype):
+    parts = key.split(".")
+    attr = model
+
+    # Traverse to the parent of the final attribute
+    for p in parts[:-1]:
+        attr = attr[int(p)] if p.isdigit() else getattr(attr, p)
+
+    final_key = parts[-1]
+
+    # Special case: in_proj split
+    if final_key in {"in_proj_weight", "in_proj_bias"} and hasattr(attr, "to_q"):
+        print(f"🔀 Replacing {key} with to_q/k/v Parameters of dtype {value.dtype}", flush=True)
+        chunks = value.chunk(3, dim=0)
+        target_attr = "weight" if "weight" in final_key else "bias"
+        for proj_name, chunk in zip(["to_q", "to_k", "to_v"], chunks):
+            proj = getattr(attr, proj_name)
+            setattr(proj, target_attr, torch.nn.Parameter(chunk.to(device=proj.weight.device)))
+        return
+
+    # General case: replace entire parameter
+    param_tensor = value.to(device=attr._parameters[final_key].device)
+    setattr(attr, final_key, torch.nn.Parameter(param_tensor))
+    print(f"✅ Replaced {key} with dtype {param_tensor.dtype}, shape {param_tensor.shape}", flush=True)
+
+
+
+
+
+
+
 NODE_CLASS_MAPPINGS = {
     "UltraCascade_Loader"                       : UltraCascade_Loader,
     "UltraCascade_Set_LR_Guide"                 : UltraCascade_Set_LR_Guide,
@@ -1041,6 +1176,7 @@ NODE_CLASS_MAPPINGS = {
     "ClownStyle_Attn_Cascade"                   : ClownStyle_Attn_Cascade,
     "ClownStyle_Cascade"                        : ClownStyle_Cascade,
     "ClownStyle_Effnet_Cascade"                 : ClownStyle_Effnet_Cascade,
+    "LayerPatcher_Cascade"                      : LayerPatcher_Cascade,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {

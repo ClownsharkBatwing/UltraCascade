@@ -143,7 +143,7 @@ class TransInr(nn.Module):
 
         original = dtokens
 
-        dtokens = self.input_layer(dtokens)
+        dtokens = self.input_layer(dtokens.to(self.input_layer.weight))
         dtokens = self.tokenizer(dtokens)
 
         wtokens = einops.repeat(self.wtokens, "n d -> b n d", b=dtokens.shape[0])

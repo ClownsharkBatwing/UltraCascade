@@ -39,7 +39,7 @@ class ReOptimizedAttention_fp32(nn.Module):
 
         self.out_proj = operations.Linear(c, c, bias=True, dtype=dtype, device=device)
 
-    def forward(self, q, k, v, style_block=None): # k,v always identical
+    def forward(self, q, k, v, style_block=None, attn_mask=None): # k,v always identical
         dtype_init = q.dtype
         
         q = F.linear(q.float(), self.to_q.weight.data.float(), self.to_q.bias.data.float())
@@ -50,7 +50,10 @@ class ReOptimizedAttention_fp32(nn.Module):
         k = style_block(k, "k_proj")
         v = style_block(v, "v_proj")
 
-        out = optimized_attention(q, k, v, self.heads)
+        if attn_mask is not None:
+            out = attention_pytorch(q, k, v, self.heads, mask=attn_mask)
+        else:
+            out = optimized_attention(q, k, v, self.heads)        
         #out = optimized_attention(q.float(), k.float(), v.float(), self.heads).to(q)
         
         out = style_block(out, "attn")
@@ -67,7 +70,7 @@ class ReAttention2D_fp32(nn.Module):
         self.attn = ReOptimizedAttention(c, nhead, dtype=dtype, device=device, operations=operations)
         # self.attn = nn.MultiheadAttention(c, nhead, dropout=dropout, bias=True, batch_first=True, dtype=dtype, device=device)
 
-    def forward(self, x, kv, self_attn=False, style_block=None):
+    def forward(self, x, kv, self_attn=False, style_block=None, attn_mask=None):
         dtype_init = x.dtype
         orig_shape = x.shape
         x = x.view(x.size(0), x.size(1), -1).permute(0, 2, 1)  # Bx4xHxW -> Bx(HxW)x4
@@ -81,7 +84,7 @@ class ReAttention2D_fp32(nn.Module):
         else:
             pass
         # x = self.attn(x, kv, kv, need_weights=False)[0]
-        x = self.attn(x, kv, kv, style_block=style_block)
+        x = self.attn(x, kv, kv, style_block=style_block, attn_mask=attn_mask)
         x = x.permute(0, 2, 1).view(*orig_shape)
         return x.to(dtype_init)
 
@@ -96,7 +99,7 @@ class ReAttnBlock_fp32(nn.Module):
             operations.Linear(c_cond, c, dtype=dtype, device=device)
         )
 
-    def forward(self, x, kv, style_block=None):
+    def forward(self, x, kv, style_block=None, attn_mask=None):
         dtype_init = x.dtype
         x  = x.float()
         kv = kv.float()
@@ -104,7 +107,7 @@ class ReAttnBlock_fp32(nn.Module):
         kv = self.kv_mapper[0](kv)
         kv = F.linear(kv, self.kv_mapper[1].weight.data.float(), self.kv_mapper[1].bias.data.float())
         
-        x = x + self.attention(self.norm(x), kv, self_attn=self.self_attn, style_block=style_block)
+        x = x + self.attention(self.norm(x), kv, self_attn=self.self_attn, style_block=style_block, attn_mask=attn_mask)
         
         return x.to(dtype_init)
 
